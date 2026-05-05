@@ -1,0 +1,1481 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{parskip}
+\usepackage{mdframed}
+
+% ── colours ──────────────────────────────────────────────────────────────────
+\definecolor{added}    {rgb}{0.00,0.42,0.00}
+\definecolor{removed}  {rgb}{0.65,0.00,0.00}
+\definecolor{hunk}     {rgb}{0.00,0.30,0.60}
+\definecolor{codebg}   {rgb}{0.97,0.97,0.97}
+\definecolor{annotbg}  {rgb}{1.00,0.98,0.88}
+\definecolor{annotborder}{rgb}{0.85,0.65,0.00}
+
+% ── listings style: unified diff ─────────────────────────────────────────────
+\lstdefinelanguage{udiff}{
+  morecomment=[f][\color{added}]{+},
+  morecomment=[f][\color{removed}]{-},
+  morecomment=[f][\color{hunk}]{@@},
+}
+\lstdefinestyle{diff}{
+  language=udiff,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\scriptsize,
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  keepspaces=true,
+}
+\lstdefinestyle{cpp}{
+  language=C++,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\scriptsize,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  keepspaces=true,
+}
+
+% ── annotation box ────────────────────────────────────────────────────────────
+\newmdenv[
+  backgroundcolor=annotbg,
+  linecolor=annotborder,
+  linewidth=1.2pt,
+  leftmargin=4pt,
+  rightmargin=4pt,
+  innerleftmargin=6pt,
+  innertopmargin=4pt,
+  innerbottommargin=4pt,
+]{annotation}
+
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\title{\textbf{PX4 Autosoaring --- Complete Annotated Diff}\\
+\large Every changed line explained:\\
+\texttt{Pictures/PX4-Autopilot} (modified) vs \texttt{Music/PX4-Autopilot} (original)}
+\author{Radhouene --- Fixed-Wing Autosoaring Project}
+\date{May 2026}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{Overview of all changed files}
+%==============================================================================
+
+\begin{longtable}{lp{9.5cm}}
+\toprule
+\textbf{File} & \textbf{What changed} \\
+\midrule
+\texttt{msg/CMakeLists.txt} & +2 lines: register the two new message files \\
+\texttt{msg/AutosoaringControl.msg} & New file (44 lines): companion→FMU command \\
+\texttt{msg/AutosoaringStatus.msg} & New file (22 lines): FMU→companion feedback \\
+\texttt{dds\_topics.yaml} & +6 lines: bridge both topics via XRCE-DDS \\
+\texttt{Commander.cpp} & +31 added / -1 removed: soar: CLI subcommands + DO\_REPOSITION fix \\
+\texttt{FixedwingPositionControl.hpp} & +52 added: includes, subscribers, publishers, state variables, parameters \\
+\texttt{fw\_path\_navigation\_params.c} & +154 added: 9 new soaring parameters with full QGC metadata \\
+\texttt{TECS.hpp} & +22 added: gliding flag, params, setters, integrator state \\
+\texttt{TECS.cpp} & +105 added / -8 removed: 7 gliding-mode modifications \\
+\texttt{navigator\_main.cpp} & +22 added / -7 removed: param3 loiter geometry + ORBIT state \\
+\texttt{mission.cpp} & +1 added: clear paused-seq on index jump \\
+\texttt{mission\_base.cpp} & +18 added / -1 moved: mission-pause seq guard in 5 locations \\
+\texttt{mission\_base.h} & +1 added: \texttt{\_mission\_paused\_seq} member \\
+\texttt{4008\_gz\_advanced\_plane} & -1/+1: \texttt{FW\_THR\_MIN} 0.05→0.00 \\
+\bottomrule
+\end{longtable}
+
+%==============================================================================
+\section{msg/CMakeLists.txt}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role of this file:} PX4's CMake build system reads \texttt{set(msg\_files ...)} in this file and runs the uORB code generator on every listed \texttt{.msg} file. Without an entry here the C struct header (e.g.\ \texttt{autosoaring\_control\_s}) is never generated and the module will not compile.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
+@@ -40,6 +40,8 @@
+ 	AckermannVelocitySetpoint.msg
+ 	ActionRequest.msg
+ 	ActuatorArmed.msg
++	AutosoaringControl.msg     <-- NEW: companion sends soaring mode to FMU
++	AutosoaringStatus.msg      <-- NEW: FMU sends phase feedback to companion
+ 	ActuatorControlsStatus.msg
+\end{lstlisting}
+
+\begin{annotation}
+\textbf{Line +1 \texttt{AutosoaringControl.msg}:} Tells the generator to produce \texttt{autosoaring\_control\_s} and \texttt{ORB\_ID(autosoaring\_control)}. The \texttt{uxrce\_dds\_client} will subscribe to it and forward DDS data from the companion into this uORB topic.
+
+\textbf{Line +2 \texttt{AutosoaringStatus.msg}:} Tells the generator to produce \texttt{autosoaring\_status\_s} and \texttt{ORB\_ID(autosoaring\_status)}. The \texttt{uxrce\_dds\_client} will read from this topic and publish it on the DDS bus so the companion can subscribe.
+\end{annotation}
+
+%==============================================================================
+\section{msg/AutosoaringControl.msg (New file)}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Direction:} companion (ROS~2) $\to$ FMU via XRCE-DDS \texttt{/fmu/in/autosoaring\_control}.\\
+\textbf{Consumer:} \texttt{FixedwingPositionControl} reads it in \texttt{autosoaring\_control\_poll()}.\\
+\textbf{Design rationale:} replaces two booleans (\texttt{glide\_mode\_enabled}, \texttt{thermal\_mode\_enabled}) with a single \texttt{uint8} integer. The old design had an ambiguous \texttt{glide=true, thermal=true} state and a hidden dimension in \texttt{FW\_GLIDE\_MODE}.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint64  timestamp
+\end{lstlisting}
+\begin{annotation}Mandatory PX4 field. The companion sets it to 0; the DDS bridge and uORB machinery do not use it for control, but it is stored in ULog for time-alignment during post-flight analysis.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint8   soaring_mode
++uint8 SOARING_OFF             = 0   # Normal powered flight
++uint8 SOARING_GLIDE_FIXED     = 1   # Engine-off, fixed EAS = FW_GLIDE_AIRSPD
++uint8 SOARING_GLIDE_POLAR     = 2   # Engine-off, polar best-glide EAS = sqrt(B/A)
++uint8 SOARING_THERMAL_LOITER  = 3   # Thermalling, radius-guided loiter via navigator
++uint8 SOARING_THERMAL_BANK    = 4   # Thermalling, direct bank-angle (companion controls)
+\end{lstlisting}
+\begin{annotation}The single field that drives all FMU soaring logic. \textbf{0} returns to powered flight. \textbf{1} enables glide at a fixed user-specified EAS. \textbf{2} computes EAS from the aircraft polar ($\sqrt{B/A}$). \textbf{3} tells the navigator to loiter at a companion-supplied centre. \textbf{4} lets the companion dictate the bank angle directly (for centering algorithms).\end{annotation}
+
+\begin{lstlisting}[style=diff]
++float32 loiter_radius_m    # NaN = auto-derive from bank_angle_cmd
++float32 loiter_lat         # Thermal centre latitude  [deg]; NaN or 0 = current pos
++float32 loiter_lon         # Thermal centre longitude [deg]; NaN or 0 = current pos
+\end{lstlisting}
+\begin{annotation}Used only when \texttt{soaring\_mode = 3} (THERMAL\_LOITER). The FMU forwards these to the navigator via \texttt{VEHICLE\_CMD\_DO\_REPOSITION} with the signed radius packed into \texttt{param3}. NaN sentinels avoid a separate boolean for ``use default''.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++float32 airspeed_cmd       # MacCready speed [m/s EAS]; mode 1 only. NaN=FW_GLIDE_AIRSPD
++float32 bank_angle_cmd     # Bank angle magnitude [deg]; modes 3 and 4
++bool    loiter_clockwise   # true = CW (right), false = CCW (left). Default: true
+\end{lstlisting}
+\begin{annotation}\texttt{airspeed\_cmd} overrides \texttt{FW\_GLIDE\_AIRSPD} for mode~1; the companion can implement a MacCready speed-to-fly calculator. \texttt{bank\_angle\_cmd} sets the loiter tightness; the FMU converts it to a minimum radius. \texttt{loiter\_clockwise} controls turn direction — useful for thermal asymmetries.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint8   soaring_phase      # Companion-reported phase (metadata only, FMU does not act)
++uint8 SOARING_PHASE_CRUISE    = 0
++uint8 SOARING_PHASE_GLIDING   = 1
++uint8 SOARING_PHASE_SEARCHING = 2
++uint8 SOARING_PHASE_CENTERING = 3
++uint8 SOARING_PHASE_THERMAL   = 4
+\end{lstlisting}
+\begin{annotation}The companion writes its internal state-machine phase here so it is recorded in ULog. The FMU reads but ignores it for control. Note: the \emph{FMU-derived} phase (what the FMU is actually doing) lives in \texttt{AutosoaringStatus.fmu\_soaring\_phase}.\end{annotation}
+
+%==============================================================================
+\section{msg/AutosoaringStatus.msg (New file)}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Direction:} FMU $\to$ companion via XRCE-DDS \texttt{/fmu/out/autosoaring\_status}.\\
+\textbf{Publisher:} \texttt{FixedwingPositionControl::publish\_autosoaring\_status()}.\\
+\textbf{Publication cadence:} 2~Hz during active soaring (\texttt{SOURCE\_PERIODIC}); 1~Hz for 5~s after \texttt{soar:off}; one-shot on watchdog event.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint64 timestamp
+\end{lstlisting}
+\begin{annotation}Set to \texttt{hrt\_absolute\_time()} at publish time. Allows the companion to compute message age and detect missed samples.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint8 source
++uint8 SOURCE_CLI_SOARING_OFF      = 0  # Operator soar:off via VEHICLE_CMD_CUSTOM_0
++uint8 SOURCE_STALENESS_WATCHDOG   = 1  # Companion silent >2 s, soaring forced OFF
++uint8 SOURCE_PERIODIC             = 2  # 2 Hz heartbeat during active soaring
+\end{lstlisting}
+\begin{annotation}\texttt{source} tells the companion \emph{why} this message was published.\\
+\textbf{0 (CLI\_SOARING\_OFF):} The ground operator issued \texttt{commander mode soar:off}. The companion must stop asserting soaring on for at least \texttt{dds\_inhibit\_until\_us - now} microseconds.\\
+\textbf{1 (STALENESS\_WATCHDOG):} The companion has been silent for more than 2~s. The FMU disabled soaring autonomously. The companion should check its DDS link.\\
+\textbf{2 (PERIODIC):} Normal 2~Hz heartbeat carrying the live \texttt{fmu\_soaring\_phase}.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint8  soaring_mode_effective  # Mode in _autosoaring_control after the event
+\end{lstlisting}
+\begin{annotation}The value the FMU's internal \texttt{\_autosoaring\_control.soaring\_mode} was set to when the message was published. After \texttt{soar:off} or the watchdog this is always 0. During \texttt{SOURCE\_PERIODIC} it reflects the current commanded mode (1--4).\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint64 dds_inhibit_until_us  # Absolute HRT time [us]; 0 = no inhibit
+\end{lstlisting}
+\begin{annotation}Non-zero only while a \texttt{soar:off} 5-second inhibit is active. The companion computes the remaining window as \texttt{dds\_inhibit\_until\_us - current\_time\_us}. After this timestamp any DDS publish of \texttt{soaring\_mode != 0} will be accepted again.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++uint8 fmu_soaring_phase
++uint8 SOARING_PHASE_CRUISE    = 0  # Powered cruise (soaring OFF or forbidden)
++uint8 SOARING_PHASE_GLIDING   = 1  # Engine-off glide along mission
++uint8 SOARING_PHASE_SEARCHING = 2  # Thermal mode ON, loiter centre not yet set
++uint8 SOARING_PHASE_THERMAL   = 3  # Thermal loiter, centre established
+\end{lstlisting}
+\begin{annotation}The FMU-derived phase, computed from the internal booleans \texttt{effective\_glide} and \texttt{effective\_thermal}, and from whether \texttt{\_soaring\_last\_lat} is finite (loiter centre known). This is independent of what the companion \emph{commanded}; it tells the companion what is \emph{actually happening} on the FMU side, including implicit mode changes driven by altitude limits.\end{annotation}
+
+%==============================================================================
+\section{src/modules/uxrce\_dds\_client/dds\_topics.yaml}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role:} The \texttt{uxrce\_dds\_client} module bridges uORB topics to ROS~2 DDS. It reads this YAML to decide which topics to publish (FMU$\to$ROS~2) and which to subscribe (ROS~2$\to$FMU). Without an entry here a topic is invisible to the companion even if it exists in uORB.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
+@@ -74,6 +74,9 @@
+   - topic: /fmu/out/airspeed_validated
+     type: px4_msgs::msg::AirspeedValidated
+
++  - topic: /fmu/out/autosoaring_status       <-- FMU publishes, companion subscribes
++    type: px4_msgs::msg::AutosoaringStatus
+
+   - topic: /fmu/out/vtol_vehicle_status
+\end{lstlisting}
+\begin{annotation}Registers the \textbf{publications} (FMU$\to$ROS~2) side. The bridge reads \texttt{ORB\_ID(autosoaring\_status)} from uORB and re-publishes it on the DDS bus as \texttt{/fmu/out/autosoaring\_status} with type \texttt{px4\_msgs::msg::AutosoaringStatus}. The companion echoes it with \texttt{ros2 topic echo /fmu/out/autosoaring\_status}.\end{annotation}
+
+\begin{lstlisting}[style=diff]
+@@ -130,6 +133,9 @@
+   - topic: /fmu/in/trajectory_setpoint
+     type: px4_msgs::msg::TrajectorySetpoint
+
++  - topic: /fmu/in/autosoaring_control       <-- companion publishes, FMU subscribes
++    type: px4_msgs::msg::AutosoaringControl
+
+   - topic: /fmu/in/vehicle_attitude_setpoint
+\end{lstlisting}
+\begin{annotation}Registers the \textbf{subscriptions} (ROS~2$\to$FMU) side. The bridge listens on DDS for messages on \texttt{/fmu/in/autosoaring\_control} and writes them into \texttt{ORB\_ID(autosoaring\_control)} uORB, where \texttt{fw\_pos\_control} picks them up via \texttt{\_autosoaring\_control\_sub.update()}.\end{annotation}
+
+%==============================================================================
+\section{src/modules/commander/Commander.cpp}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role of Commander in PX4:} Commander manages the vehicle's high-level state machine: arming, mode transitions, preflight checks, and failsafe responses. It exposes a CLI via the NuttShell, and sends MAVLink commands (\texttt{VEHICLE\_CMD\_DO\_SET\_MODE}, \texttt{VEHICLE\_CMD\_CUSTOM\_0}) to other modules.\\
+
+\textbf{Why two commands per soaring transition:} \texttt{VEHICLE\_CMD\_CUSTOM\_0(param1=mode)} is consumed by \texttt{fw\_pos\_control} to set its internal soaring mode and arm/disarm the DDS inhibit. \texttt{VEHICLE\_CMD\_DO\_SET\_MODE} switches the navigator state (\texttt{AUTO\_MISSION} or \texttt{AUTO\_LOITER}) so the flight path follows the correct behaviour.
+\end{annotation}
+
+\subsection{Hunk 1 — new \texttt{mode soar:*} subcommands (lines +417--450)}
+
+\begin{lstlisting}[style=diff]
+@@ -417,6 +417,37 @@
+			send_vehicle_command(VEHICLE_CMD_DO_SET_MODE, 1,
+					     PX4_CUSTOM_MAIN_MODE_AUTO,
+					     PX4_CUSTOM_SUB_MODE_EXTERNAL1);
+
++		} else if (!strcmp(argv[1], "soar:glide")) {
+\end{lstlisting}
+\begin{annotation}\texttt{argv[1]} is the string typed after \texttt{commander mode} in the NSH shell or QGC MAVLink Console. So the full command is \texttt{commander mode soar:glide}. The check lives inside the existing \texttt{if (strcmp(argv[0], "mode"))} block.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++			// SOARING_GLIDE_FIXED (mode 1): engine-off, fixed EAS = FW_GLIDE_AIRSPD
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 1.0f, 0.0f);
+\end{lstlisting}
+\begin{annotation}\texttt{VEHICLE\_CMD\_CUSTOM\_0} is intercepted by \texttt{FixedwingPositionControl::vehicle\_command\_poll()}. \texttt{param1 = 1.0} maps to \texttt{SOARING\_GLIDE\_FIXED}. \texttt{param2 = 0.0} is unused for enable commands.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1,
++					     PX4_CUSTOM_MAIN_MODE_AUTO,
++					     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+\end{lstlisting}
+\begin{annotation}Switches the navigator to \texttt{AUTO\_MISSION} so the aircraft continues following the loaded mission waypoints while gliding.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		} else if (!strcmp(argv[1], "soar:polar")) {
++			// SOARING_GLIDE_POLAR (mode 2): engine-off, polar best-glide EAS = sqrt(B/A)
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 2.0f, 0.0f);
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1,
++					     PX4_CUSTOM_MAIN_MODE_AUTO,
++					     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+\end{lstlisting}
+\begin{annotation}Same as glide-fixed but \texttt{param1 = 2}. \texttt{fw\_pos\_control} will compute EAS from \texttt{sqrt(FW\_POLAR\_B / FW\_POLAR\_A)} instead of using \texttt{FW\_GLIDE\_AIRSPD}. Navigator state is the same (\texttt{AUTO\_MISSION}).\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		} else if (!strcmp(argv[1], "soar:thermal")) {
++			// SOARING_THERMAL_LOITER (mode 3): radius-guided loiter via navigator
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 3.0f, 0.0f);
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1,
++					     PX4_CUSTOM_MAIN_MODE_AUTO,
++					     PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
+\end{lstlisting}
+\begin{annotation}\texttt{param1 = 3}: thermal loiter. Navigator is switched to \texttt{AUTO\_LOITER} so the aircraft circles. The loiter centre is supplied by the companion via subsequent \texttt{DO\_REPOSITION} commands once a thermal is found.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		} else if (!strcmp(argv[1], "soar:bank")) {
++			// SOARING_THERMAL_BANK (mode 4): direct bank-angle loiter, companion controls centering
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 4.0f, 0.0f);
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1,
++					     PX4_CUSTOM_MAIN_MODE_AUTO,
++					     PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
+\end{lstlisting}
+\begin{annotation}\texttt{param1 = 4}: the companion sends a desired bank angle via \texttt{bank\_angle\_cmd}. The FMU applies it directly as a roll override, giving the companion fine-grained control over the thermal centering spiral.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		} else if (!strcmp(argv[1], "soar:off")) {
++			// SOARING_OFF (mode 0): disable soaring, restore powered flight
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 0.0f, 0.0f);
++			send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1,
++					     PX4_CUSTOM_MAIN_MODE_AUTO,
++					     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+\end{lstlisting}
+\begin{annotation}\texttt{param1 = 0}: \texttt{fw\_pos\_control} receives this, sets \texttt{soaring\_mode = SOARING\_OFF}, arms the 5-second DDS inhibit window, resets \texttt{\_autosoaring\_last\_recv\_us = 0} (suppresses watchdog), and publishes \texttt{AutosoaringStatus} with \texttt{SOURCE\_CLI\_SOARING\_OFF}. The second command returns the navigator to \texttt{AUTO\_MISSION}.\end{annotation}
+
+\subsection{Hunk 2 --- DO\_REPOSITION param2 fix (lines +782--95)}
+
+\begin{lstlisting}[style=diff]
+@@ -751,7 +782,15 @@
+		const bool mode_switch_not_requested = (change_mode_flags & 1) == 0;
+		const bool unsupported_bits_set = (change_mode_flags & ~1) != 0;
+
+-		if (mode_switch_not_requested || unsupported_bits_set) {
++		// Soaring: param2==1 requests a mode switch; param2==0 = position-only update.
++		// Stock logic rejected param2==0 with UNSUPPORTED; we now accept it so that
++		// companion thermal loiter repositions work without a mode switch.
++		if (mode_switch_not_requested) {
++			// Position-only update: accept so navigator processes the new centre
++			cmd_result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED;
++
++		} else if (unsupported_bits_set) {
+			answer_command(cmd, vehicle_command_ack_s::VEHICLE_CMD_RESULT_UNSUPPORTED);
+\end{lstlisting}
+\begin{annotation}
+\textbf{Original behaviour:} if \texttt{param2} bit~0 was clear (``no mode switch requested'') Commander returned \texttt{UNSUPPORTED}, and \texttt{DO\_REPOSITION} was silently dropped.\\
+\textbf{Problem:} The companion sends \texttt{DO\_REPOSITION} with \texttt{param2 = 0} to update the thermal centre without changing the flight mode (already in \texttt{AUTO\_LOITER}). The old rejection caused the loiter centre to never update.\\
+\textbf{Fix:} When \texttt{mode\_switch\_not\_requested} is true, immediately \texttt{ACCEPTED} and let the navigator handle the position update. When unsupported bits are set, still reject. The normal mode-switch path (\texttt{param2} bit~0 set) is unchanged.
+\end{annotation}
+
+%==============================================================================
+\section{src/modules/fw\_pos\_control/fw\_path\_navigation\_params.c}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role:} PX4 parameter definitions for the \texttt{fw\_pos\_control} module. The macros generate QGC metadata (units, min, max, decimal, group) and register the parameter with the PX4 parameter system. All new parameters belong to the \texttt{FW Soaring} group so they appear together in QGC.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_ALT_MIN, 100.0f);
+\end{lstlisting}
+\begin{annotation}\textbf{Soaring altitude floor [m].} Below this altitude the FMU ignores all DDS soaring-enable requests and latches \texttt{\_soaring\_forbidden\_latched = true}. The latch is released only when the companion explicitly publishes \texttt{soaring\_mode = 0}. This prevents the aircraft from entering glide near the ground.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_ALT_MAX, 500.0f);
+\end{lstlisting}
+\begin{annotation}\textbf{Thermal ceiling [m].} When altitude exceeds this value during thermal mode (\texttt{\_alt\_max\_reached = true}), the FMU forces glide regardless of the companion command. Prevents runaway altitude gain in a strong thermal.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_ALT_HYST, 20.0f);
+\end{lstlisting}
+\begin{annotation}\textbf{Ceiling hysteresis [m].} Thermal mode is only re-enabled after the aircraft descends below \texttt{FW\_ALT\_MAX - FW\_ALT\_HYST}. Without this the aircraft would oscillate rapidly between glide and thermal at the ceiling.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_GLIDE_AIRSPD, 10.0f);
+\end{lstlisting}
+\begin{annotation}\textbf{Fixed glide EAS setpoint [m/s].} Used by mode~1 (GLIDE\_FIXED) and as the hold speed during thermal modes. Passed to TECS via \texttt{set\_gliding\_airspeed\_setpoint()}. Ignored by mode~2 (GLIDE\_POLAR), which computes speed from the polar.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_POLAR_A, 0.003f);
+\end{lstlisting}
+\begin{annotation}\textbf{Polar coefficient \textit{a}.} Used in the sink-rate model: $\dot{h} = a \cdot V^2 + b$. The best-glide EAS is computed as $\sqrt{b/a}$. Fit from flight-test data at three or more airspeeds.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_POLAR_B, 0.50f);
+\end{lstlisting}
+\begin{annotation}\textbf{Polar coefficient \textit{b} [m/s].} Minimum sink rate (at best-glide speed). Together with $a$, determines the polar best-glide EAS for mode~2.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_GLIDE_RAMP_T, 2.0f);
+\end{lstlisting}
+\begin{annotation}\textbf{Throttle ramp duration on glide exit [s].} When soaring is disabled, throttle linearly ramps from 0 to the TECS demand over this duration. Prevents abrupt propwash disturbance and the pitch transient on engine restart.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_THERMAL_BANK, 40.0f);
+\end{lstlisting}
+\begin{annotation}\textbf{Default thermalling bank angle [deg].} Used when the companion does not send \texttt{bank\_angle\_cmd} or sends NaN. Steeper bank $\Rightarrow$ tighter loiter circle $\Rightarrow$ better thermal centering, but more induced drag and higher stall speed.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++PARAM_DEFINE_FLOAT(FW_GLIDE_I_DECAY, 10.0f);
+\end{lstlisting}
+\begin{annotation}\textbf{Throttle integrator decay time constant [s].} During gliding the TECS throttle integrator is not updated but decays as $I(t) = I(0) \cdot e^{-t/\tau}$. This brings the integrator to zero before engine restart so there is no throttle surge. Default 10~s: after one thermal circuit ($\approx 30$~s) the integrator is at $<5\%$.\end{annotation}
+
+%==============================================================================
+\section{src/lib/tecs/TECS.hpp}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role:} Declares the \texttt{TECSControl} class (inner TECS controller) and the outer \texttt{TECS} class (altitude and airspeed reference model). All soaring modifications are additions; no existing interface is removed.
+\end{annotation}
+
+\subsection{Hunk 1 — new fields in \texttt{struct Param}}
+
+\begin{lstlisting}[style=diff]
+@@ -238,6 +238,10 @@
+		float fast_descend;
++		float gliding_airspeed_setpoint{10.0f};
+\end{lstlisting}
+\begin{annotation}Pre-computed EAS setpoint for glide modes. Set by \texttt{fw\_pos\_control} before calling \texttt{TECSControl::update()} so TECS does not need to know about soaring modes or polar parameters.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		float glide_i_decay{10.0f};
+\end{lstlisting}
+\begin{annotation}Time constant (seconds) for exponential throttle integrator decay during gliding. Mirrors \texttt{FW\_GLIDE\_I\_DECAY}; passed through the \texttt{Param} struct so the decay is computed inside \texttt{\_calcThrottleControlUpdate()} without accessing external parameters.\end{annotation}
+
+\subsection{Hunk 2 — new flag in \texttt{struct Flag}}
+
+\begin{lstlisting}[style=diff]
+@@ -283,6 +287,7 @@
+	struct Flag {
+		bool airspeed_enabled;
+		bool detect_underspeed_enabled;
++		bool gliding_mode_enabled{false};
+\end{lstlisting}
+\begin{annotation}The central gliding-mode flag. When true, TECS applies seven modifications: energy weighting, underspeed bypass, integrator decay, throttle zeroing, accel energy cap, pitch integrator partial reset, and altitude reference freeze. All modifications guard on this single flag, making the gliding path easy to audit.\end{annotation}
+
+\subsection{Hunk 3 — \texttt{\_calcThrottleControlSteRate} signature change}
+
+\begin{lstlisting}[style=diff]
+ 	ControlValues _calcThrottleControlSteRate(const STERateLimit &limit,
+		const SpecificEnergyRates &specific_energy_rate,
+-		const Param &param) const;
++		const Param &param, const Flag &flag) const;
+\end{lstlisting}
+\begin{annotation}The \texttt{flag} argument is added so that \texttt{\_calcThrottleControlSteRate} can apply the gliding-mode acceleration energy cap. Previously it had no knowledge of flight mode. All call sites are updated to pass \texttt{flag}.\end{annotation}
+
+\subsection{Hunk 4 — new state variable}
+
+\begin{lstlisting}[style=diff]
++	bool  _prev_gliding_mode{false};
+\end{lstlisting}
+\begin{annotation}Latches the gliding mode flag from the previous update cycle. Used in \texttt{\_calcPitchControl()} to detect entry (\texttt{false→true}) and exit (\texttt{true→false}) transitions so the pitch integrator partial reset is applied exactly once per transition.\end{annotation}
+
+\subsection{Hunk 5 — public soaring interface}
+
+\begin{lstlisting}[style=diff]
++	void set_gliding_mode_enabled(bool enabled)
++	    { _control_flag.gliding_mode_enabled = enabled; }
++	bool get_gliding_mode_enabled() const
++	    { return _control_flag.gliding_mode_enabled; }
++	void set_gliding_airspeed_setpoint(float eas)
++	    { _control_param.gliding_airspeed_setpoint = eas; }
++	void set_glide_i_decay(float tau)
++	    { _control_param.glide_i_decay = math::max(tau, 0.1f); }
+\end{lstlisting}
+\begin{annotation}\texttt{fw\_pos\_control} calls \texttt{set\_gliding\_mode\_enabled(true/false)} whenever \texttt{effective\_glide || effective\_thermal} changes. The other setters are called once per parameter update cycle to propagate QGC parameter changes into TECS without exposing internal structs.\end{annotation}
+
+\subsection{Hunk 6 — default initialisation}
+
+\begin{lstlisting}[style=diff]
+-		.fast_descend = 0.f
++		.fast_descend = 0.f,
++		.gliding_airspeed_setpoint = 10.0f,
++		.glide_i_decay = 10.0f,
+	};
+	TECSControl::Flag _control_flag{
+		.airspeed_enabled = false,
+		.detect_underspeed_enabled = false,
++		.gliding_mode_enabled = false,
+	};
+\end{lstlisting}
+\begin{annotation}Explicit zero/default initialisation in the aggregate initialisers. The comma on \texttt{.fast\_descend} is required by C++17 aggregate initialisation rules when new fields are appended. \texttt{gliding\_mode\_enabled = false} ensures powered-flight behaviour on startup.\end{annotation}
+
+%==============================================================================
+\section{src/lib/tecs/TECS.cpp}
+%==============================================================================
+
+\begin{annotation}
+Seven modifications are made to \texttt{TECS.cpp}, all guarded by \texttt{flag.gliding\_mode\_enabled} or \texttt{\_control\_flag.gliding\_mode\_enabled}. None of the existing powered-flight code paths are removed.
+\end{annotation}
+
+\subsection{Mod 1 — pass \texttt{flag} to \texttt{\_calcThrottleControlSteRate}}
+
+\begin{lstlisting}[style=diff]
+-	ControlValues ste_rate{_calcThrottleControlSteRate(limit, specific_energy_rate, param)};
++	ControlValues ste_rate{_calcThrottleControlSteRate(limit, specific_energy_rate, param, flag)};
+\end{lstlisting}
+\begin{annotation}Two call sites updated (lines 250 and 577). The function now has access to the gliding flag so it can skip the induced-drag load-factor correction and apply the correct energy cap.\end{annotation}
+
+\subsection{Mod 2 — acceleration energy cap in \texttt{\_calculateTASSetpointRateLimit}}
+
+\begin{lstlisting}[style=diff]
+-		const float max_tas_rate_sp = (param.fast_descend * 0.5f + 0.5f) * limit.STE_rate_max
+-					      / math::max(input.tas, FLT_EPSILON);
++		// In gliding, no thrust available: energy rate bounded by gravity (|STE_rate_min|)
++		// not by powered max climb. Using the powered limit produces spurious pitch transients.
++		const float available_accel_energy_rate = flag.gliding_mode_enabled
++				? fabsf(limit.STE_rate_min)    // gravity-only: bounded by glide sink rate
++				: limit.STE_rate_max;           // powered: bounded by max climb rate
++		const float max_tas_rate_sp = (param.fast_descend * 0.5f + 0.5f) * available_accel_energy_rate
++					      / math::max(input.tas, FLT_EPSILON);
+\end{lstlisting}
+\begin{annotation}In powered flight the aircraft can convert thrust into kinetic energy rapidly, so \texttt{STE\_rate\_max} (derived from max climb rate) is the correct upper bound. In gliding, thrust is zero; the only energy source for acceleration is gravity (trading altitude for speed). Using \texttt{|STE\_rate\_min|} (the glide polar sink rate) as the cap prevents the controller from demanding kinetic energy gains that are physically impossible, which would cause spurious nose-down pitch commands.\end{annotation}
+
+\subsection{Mod 3 — underspeed mitigation bypass}
+
+\begin{lstlisting}[style=diff]
++	if (flag.gliding_mode_enabled) {
++		_ratio_undersped = 0.0f;  // suppress false underspeed detection in glide
++		return;
++	}
+\end{lstlisting}
+\begin{annotation}The glide EAS (\texttt{FW\_GLIDE\_AIRSPD}, e.g.\ 10~m/s) is deliberately below the cruise trim speed. The underspeed detector compares current speed to a boundary derived from \texttt{equivalent\_airspeed\_trim} (cruise speed), so the glide speed always appears to be ``starting to underspeed''. This falsely activates mitigation that raises throttle and forces speed-on-elevator weighting — both are already correctly set by the gliding flag. Clearing \texttt{\_ratio\_undersped} and returning early keeps the control path clean.\end{annotation}
+
+\subsection{Mod 4 — energy weighting override}
+
+\begin{lstlisting}[style=diff]
++	if (flag.gliding_mode_enabled) {
++		weight.spe_weighting = 0.0f;  // altitude not controlled by pitch in glide
++		weight.ske_weighting = 2.0f;  // full speed control via pitch
++		return weight;
++	}
+\end{lstlisting}
+\begin{annotation}In powered flight TECS balances altitude (SPE) and speed (SKE) control equally. In gliding, throttle is zero so altitude cannot be recovered by adding thrust; only speed (pitch angle) can be commanded. Forcing $w_{SPE}=0$, $w_{SKE}=2$ gives full airspeed authority to the pitch channel, which is the standard glider control law.\end{annotation}
+
+\subsection{Mod 5 — pitch integrator partial reset on transition}
+
+\begin{lstlisting}[style=diff]
++	if (flag.gliding_mode_enabled && !_prev_gliding_mode) {
++		_pitch_integ_state *= 0.5f;          // glide entry
++	} else if (!flag.gliding_mode_enabled && _prev_gliding_mode) {
++		_pitch_integ_state *= 0.5f;          // glide exit
++	}
++	_prev_gliding_mode = flag.gliding_mode_enabled;
+\end{lstlisting}
+\begin{annotation}\textbf{Entry (powered $\to$ glide):} The cruise integrator holds an altitude-control bias. When gliding starts, energy weighting switches to speed-only. The altitude bias now fights the speed setpoint and causes an airspeed overshoot for several seconds. Halving it removes most of the mismatch while retaining CG/trim knowledge.
+
+\textbf{Exit (glide $\to$ powered):} The glide integrator has wound up to hold glide speed at zero throttle. When throttle ramps back in, this integrator still commands nose-down pitch, producing a large pitch-rate spike. Halving it symmetrically suppresses the spike.
+
+Partial reset ($\times 0.5$) is a compromise: fast mode handover without fully discarding steady-state trim information.\end{annotation}
+
+\subsection{Mod 6 — throttle integrator decay}
+
+\begin{lstlisting}[style=diff]
++	if (flag.gliding_mode_enabled) {
++		const float decay = math::max(param.glide_i_decay, 0.1f);
++		_throttle_integ_state -= dt * _throttle_integ_state / decay;
++		return;
++	}
+\end{lstlisting}
+\begin{annotation}During gliding the normal throttle integrator update loop is skipped entirely. Instead the integrator decays exponentially: $I(t) = I(0) \cdot e^{-t/\tau}$ (discrete approximation: $I \mathrel{-}= dt \cdot I / \tau$). This brings the integrator to zero before engine restart so there is no throttle surge. The \texttt{return} prevents the powered-flight integrator code from running.\end{annotation}
+
+\subsection{Mod 7 — throttle output hard-zero}
+
+\begin{lstlisting}[style=diff]
++	if (flag.gliding_mode_enabled) {
++		return param.throttle_min;
++	}
+\end{lstlisting}
+\begin{annotation}The throttle output function returns \texttt{param.throttle\_min} (which is 0.0 after the ROMFS change in Section~\ref{sec:romfs}) regardless of any TECS demand when gliding. This ensures that even if an integrator residual or a setpoint error causes the controller to compute a non-zero throttle demand, the motor is not commanded. Without this guard, the throttle integrator decay of Mod~6 alone would be insufficient to guarantee zero thrust if the aircraft is descending rapidly.\end{annotation}
+
+%==============================================================================
+\section{src/modules/navigator/navigator\_main.cpp}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role of Navigator:} Navigator translates high-level navigation states (AUTO\_MISSION, AUTO\_LOITER, AUTO\_RTL, \ldots) into position-setpoint triplets consumed by \texttt{fw\_pos\_control}. Two changes are made: (1) the \texttt{DO\_REPOSITION} handler is extended to accept a signed radius in \texttt{param3}, and (2) \texttt{NAVIGATION\_STATE\_ORBIT} is mapped to the existing loiter handler.
+\end{annotation}
+
+\subsection{Hunk 1 — DO\_REPOSITION param3 loiter geometry}
+
+\begin{lstlisting}[style=diff]
+@@ -392,17 +392,30 @@
+					rep->current.loiter_pattern =
+					    position_setpoint_s::LOITER_TYPE_ORBIT;
+				}
+-				rep->current.loiter_direction_counter_clockwise =
+-				    curr->current.loiter_direction_counter_clockwise;
+-			}
+-			rep->previous.timestamp = hrt_absolute_time();
+-			rep->current.valid = true;
+-			rep->current.timestamp = hrt_absolute_time();
+-			rep->next.valid = false;
+-			_time_loitering_after_gf_breach = 0;
++				rep->current.loiter_direction_counter_clockwise =
++				    curr->current.loiter_direction_counter_clockwise;
++			}
++			rep->previous.timestamp = hrt_absolute_time();
++			rep->current.valid = true;
++			rep->current.timestamp = hrt_absolute_time();
++			rep->next.valid = false;
+\end{lstlisting}
+\begin{annotation}The first part of the change is a \textbf{de-indent} — the closing braces were at the wrong indentation level in the original (a pre-existing formatting issue). The logic is identical; only whitespace changes. This is necessary to make the subsequent additions syntactically correct.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++			// Honour explicit loiter radius and direction in param3.
++			// Convention: |param3| = radius [m]; sign = direction:
++			//   param3 > 0 → CW  (loiter_direction_counter_clockwise = false)
++			//   param3 < 0 → CCW (loiter_direction_counter_clockwise = true)
++			//   param3 == 0 or NaN → use NAV_LOITER_RAD, keep existing direction
++			if (PX4_ISFINITE(cmd.param3) && fabsf(cmd.param3) > FLT_EPSILON) {
++				rep->current.loiter_radius = fabsf(cmd.param3);
++				rep->current.loiter_direction_counter_clockwise = (cmd.param3 < 0.f);
++			} else if (!only_alt_change_requested) {
++				rep->current.loiter_radius = get_loiter_radius();
++				// direction keeps default (false = CW)
++			}
++			_time_loitering_after_gf_breach = 0;
+\end{lstlisting}
+\begin{annotation}\textbf{Why a signed radius:} The MAVLink \texttt{DO\_REPOSITION} command has no dedicated field for loiter radius. \texttt{param3} was unused (0 or NaN). By packing both magnitude and direction into the sign of \texttt{param3}, both properties can be communicated in a single float. \texttt{fw\_pos\_control} packs the value as: $\text{param3} = r \cdot (\text{clockwise} ? +1 : -1)$.
+
+The \texttt{else if (!only\_alt\_change\_requested)} branch ensures that altitude-only repositions (vertical updates, e.g.\ during climb-to-altitude) do not accidentally reset the loiter radius to the NAV default.\end{annotation}
+
+\subsection{Hunk 2 — NAVIGATION\_STATE\_ORBIT mapping}
+
+\begin{lstlisting}[style=diff]
++		case vehicle_status_s::NAVIGATION_STATE_ORBIT:
++			// Thermal loiter: reuse the loiter navigation mode.
++			// The companion sets the centre via DO_REPOSITION (handled above);
++			// we map this nav-state to the existing loiter handler.
++			_pos_sp_triplet_published_invalid_once = false;
++			navigation_mode_new = &_loiter;
++			break;
+\end{lstlisting}
+\begin{annotation">Some thermal loiter sub-modes internally set \texttt{NAVIGATION\_STATE\_ORBIT}. Without this \texttt{case}, the \texttt{switch} falls through to the \texttt{default:} handler which leaves \texttt{navigation\_mode\_new} unchanged — meaning Navigator produces no position setpoints and the aircraft idles. Mapping \texttt{ORBIT} to \texttt{\_loiter} reuses the well-tested loiter flight logic without duplicating code.\end{annotation}
+
+%==============================================================================
+\section{src/modules/navigator/mission.cpp}
+%==============================================================================
+
+\begin{lstlisting}[style=diff]
+@@ -122,6 +122,7 @@
+		// User has actively set new index, reset.
+		_inactivation_index = -1;
++		_mission_paused_seq = -1;
+		return true;
+\end{lstlisting}
+\begin{annotation}When the user manually jumps to a specific mission item (\texttt{set\_current\_mission\_index()}), the pause-sequence guard must be cleared too. Without this, the guard installed in \texttt{mission\_base.cpp} would prevent the jump from taking effect if the new index is lower than the paused sequence.\end{annotation}
+
+%==============================================================================
+\section{src/modules/navigator/mission\_base.cpp}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Problem being solved:} While the vehicle is in \texttt{AUTO\_LOITER} (thermalling), the ground station continues to publish the \texttt{mission} uORB topic at its normal rate. If a stale or repeated publication carries a lower \texttt{current\_seq} than the one active when thermal mode was entered, the mission module rewinds to an already-completed waypoint. On mission resume the aircraft flies back to that waypoint.
+
+\textbf{Fix:} A new member \texttt{\_mission\_paused\_seq} captures the current sequence at deactivation. While the mission mode is inactive, incoming updates with a lower sequence are silently clamped to the saved value.
+\end{annotation}
+
+\subsection{Hunk 1 — sequence guard in \texttt{onMissionUpdate()}}
+
+\begin{lstlisting}[style=diff]
+@@ -95,13 +95,26 @@
+		const bool mission_items_changed = (new_mission.mission_id != _mission.mission_id);
+-		const bool mission_data_changed = checkMissionDataChanged(new_mission);
+
+		if (new_mission.current_seq < 0) { ... }
+
++		if (!isActive() && (_mission_paused_seq >= 0) && !mission_items_changed
++		    && (new_mission.mission_dataman_id == _mission.mission_dataman_id)
++		    && (new_mission.current_seq < _mission_paused_seq)) {
++			new_mission.current_seq = _mission_paused_seq;
++		}
++
++		const bool mission_data_changed = checkMissionDataChanged(new_mission);
+\end{lstlisting}
+\begin{annotation}The guard has five conditions:
+\begin{enumerate}
+  \item \texttt{!isActive()} — only applies while mission mode is paused (e.g.\ in AUTO\_LOITER).
+  \item \texttt{\_mission\_paused\_seq >= 0} — a valid pause sequence was captured.
+  \item \texttt{!mission\_items\_changed} — a genuinely new mission plan (different \texttt{mission\_id}) is always accepted.
+  \item Same \texttt{mission\_dataman\_id} — ensures we compare sequences within the same mission data block.
+  \item \texttt{new\_mission.current\_seq < \_mission\_paused\_seq} — the incoming update would rewind progress.
+\end{enumerate}
+\texttt{checkMissionDataChanged} is moved after the guard so it sees the corrected sequence.\end{annotation}
+
+\subsection{Hunk 2 — clear guard after new mission items}
+
+\begin{lstlisting}[style=diff]
++		_mission_paused_seq = -1;     // new mission plan: discard old pause seq
+\end{lstlisting}
+\begin{annotation">When the dataman receives an entirely new mission plan (\texttt{has\_mission\_items\_changed}), all pause state is stale. Resetting to $-1$ disables the guard so the new mission's sequence is accepted unconditionally.\end{annotation}
+
+\subsection{Hunk 3 — capture sequence at deactivation (\texttt{on\_inactivation()})}
+
+\begin{lstlisting}[style=diff]
+@@ -196,6 +210,7 @@
+	_inactivation_index = _mission.current_seq;
++	_mission_paused_seq = _mission.current_seq;
+\end{lstlisting}
+\begin{annotation}Called when the vehicle leaves AUTO\_MISSION (e.g.\ entering AUTO\_LOITER for thermalling). Saves the current mission sequence number. The guard in Hunk~1 will use this value to clamp any stale incoming updates.\end{annotation}
+
+\subsection{Hunk 4 — clear guard and reset triplets at re-activation}
+
+\begin{lstlisting}[style=diff]
+@@ -246,10 +261,22 @@
+	checkClimbRequired(_mission.current_seq);
++	// Clear the position setpoint triplet inherited from the previous navigation mode
++	// (e.g.\ loiter setpoint from thermal circling) before building the mission triplet.
++	// Without this, setActiveMissionItems() snapshots the loiter position into
++	// pos_sp_triplet->previous, causing the aircraft to approach the next waypoint
++	// from the thermal centre direction and appear to "go back" to it.
++	_navigator->reset_triplets();
+
+	set_mission_items();
+	_mission_activation_index = _mission.current_seq;
+	_inactivation_index = -1;
++	_mission_paused_seq = -1;
+\end{lstlisting}
+\begin{annotation}\textbf{\texttt{reset\_triplets():}} When the mission module re-activates, \texttt{setActiveMissionItems()} copies the current position-setpoint triplet into \texttt{pos\_sp\_triplet.previous}. If that triplet still holds the thermal loiter centre, the fixed-wing guidance draws a track line \emph{from the thermal} to the next waypoint, causing a visible detour. Resetting the triplets forces the guidance to use the current aircraft position as the track start.
+
+\textbf{\texttt{\_mission\_paused\_seq = -1}:} Clears the guard so subsequent mission updates are accepted normally after resume.\end{annotation}
+
+\subsection{Hunk 5 — clear guard at mission loop}
+
+\begin{lstlisting}[style=diff]
++		_mission_paused_seq = -1;
+\end{lstlisting}
+\begin{annotation">Called when the mission completes and loops back to item~0. At loop time there is no longer a meaningful pause sequence, so the guard is reset.\end{annotation}
+
+\subsection{Hunk 6 — clear guard on new mission upload}
+
+\begin{lstlisting}[style=diff]
++	_mission_paused_seq = -1;
+	_mission.timestamp = hrt_absolute_time();
+	_mission.current_seq = 0;
+\end{lstlisting}
+\begin{annotation">Called at the start of a brand-new mission (after upload from QGC). The pause-seq from a previous flight must not interfere with the new mission's sequence tracking.\end{annotation}
+
+%==============================================================================
+\section{src/modules/navigator/mission\_base.h}
+%==============================================================================
+
+\begin{lstlisting}[style=diff]
+@@ -331,6 +331,7 @@
+	mission_s _mission;
+	float _mission_init_climb_altitude_amsl{NAN};
+	int _inactivation_index{-1};
++	int32_t _mission_paused_seq{-1};
+	int _mission_activation_index{-1};
+\end{lstlisting}
+\begin{annotation}Declares \texttt{\_mission\_paused\_seq} as a member of \texttt{MissionBase}. Initialised to $-1$ (guard disabled). It is a \texttt{int32\_t} to match the type of \texttt{mission\_s::current\_seq}. All six use-sites in \texttt{mission\_base.cpp} and \texttt{mission.cpp} reference this member.\end{annotation}
+
+%==============================================================================
+\section{ROMFS/px4fmu\_common/init.d-posix/airframes/4008\_gz\_advanced\_plane}
+\label{sec:romfs}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role:} This shell script is loaded by PX4 on boot when \texttt{SYS\_AUTOSTART = 4008}. It sets parameter defaults for the Gazebo-Classic advanced-plane model used in SITL tests. It is the standard test vehicle for fixed-wing autosoaring.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
+@@ -33,7 +33,7 @@
+ param set-default FW_SPOILERS_LND 0.4
+
+-param set-default FW_THR_MIN 0.05
++param set-default FW_THR_MIN 0.00  # 0.00 = true engine-off; 0.05 keeps 5% throttle
+ param set-default FW_THR_TRIM 0.25
+\end{lstlisting}
+
+\begin{annotation}
+\textbf{Why this is critical:} \texttt{FW\_THR\_MIN} is the minimum throttle floor enforced by TECS. With the default value of 0.05 the motor is never fully cut: even with \texttt{set\_gliding\_mode\_enabled(true)}, TECS clamps the output at 5\% thrust. The aircraft behaves like powered flight at very low throttle rather than a true engine-off glide, and sink-rate measurements are corrupted by the residual thrust.
+
+Setting \texttt{FW\_THR\_MIN = 0.00} allows TECS to command exactly zero throttle, enabling genuine gliding. The TECS hard-zero guard in \texttt{TECS.cpp} (Mod~7 in Section~8) then returns \texttt{param.throttle\_min = 0} directly, guaranteeing no thrust.
+
+\textbf{Safety note:} On real hardware, setting \texttt{FW\_THR\_MIN = 0} is correct for a glider or a motor-glider performing soaring trials. For a powered aircraft where thrust loss is an emergency, a small non-zero floor is advisable.
+\end{annotation}
+
+%==============================================================================
+\section{src/modules/fw\_pos\_control/FixedwingPositionControl.cpp}
+%==============================================================================
+
+\begin{annotation}
+\textbf{Role:} This is the main fixed-wing position/soaring controller. It runs at the navigation rate ($\approx$50\,Hz), reads position setpoints from the navigator, computes pitch/throttle via TECS, and publishes attitude setpoints. All soaring logic — DDS polling, CLI handling, altitude guards, thermal DO\_REPOSITION, throttle ramps, and phase heartbeat — lives here.
+
+The diff adds approximately \textbf{327 lines} and removes \textbf{50 lines} (the old per-function \texttt{pos\_sp\_curr.gliding\_enabled} blocks).
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 1 — new includes}
+
+\begin{lstlisting}[style=diff]
+@@ -34,6 +34,8 @@
+ #include "FixedwingPositionControl.hpp"
+ #include <px4_platform_common/events.h>
++#include <parameters/param.h>
++#include <commander/px4_custom_mode.h>
+\end{lstlisting}
+
+\begin{annotation}
+\textbf{\texttt{parameters/param.h}:} Needed for compile-time parameter handles (e.g.\ \texttt{param\_find}, \texttt{param\_get}) when publishing \texttt{VEHICLE\_CMD\_MISSION\_START} in the mission-restore path.
+
+\textbf{\texttt{commander/px4\_custom\_mode.h}:} Defines \texttt{PX4\_CUSTOM\_MAIN\_MODE\_AUTO}, \texttt{PX4\_CUSTOM\_SUB\_MODE\_AUTO\_MISSION}, etc., which are required when building a \texttt{VEHICLE\_CMD\_DO\_SET\_MODE} command from inside \texttt{fw\_pos\_control} (the thermal-exit AUTO\_MISSION restore command).
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 2 — \texttt{parameters\_update()}: glide airspeed and integrator decay}
+
+\begin{lstlisting}[style=diff]
+@@ -136,6 +138,21 @@
++	// Glide airspeed setpoint: computed here so TECS stays mode-agnostic.
++	// SOARING_GLIDE_POLAR (mode 2) uses polar best-glide EAS = sqrt(b/a).
++	// All other soaring modes use FW_GLIDE_AIRSPD.
++	{
++		const float polar_a = _param_fw_polar_a.get();
++		const float polar_b = _param_fw_polar_b.get();
++		const float v_polar_eas = (polar_a > FLT_EPSILON && polar_b > FLT_EPSILON)
++					  ? sqrtf(polar_b / polar_a) : 0.0f;
++		const bool polar_mode =
++		    (_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_GLIDE_POLAR);
++		_tecs.set_gliding_airspeed_setpoint(polar_mode && v_polar_eas > FLT_EPSILON
++					? v_polar_eas : _param_fw_glide_airspd.get());
++	}
++	_tecs.set_glide_i_decay(_param_fw_glide_i_decay.get());
+\end{lstlisting}
+
+\begin{annotation}
+Called every time a parameter is updated (1\,Hz). Pre-computes the TECS glide airspeed setpoint so TECS is completely agnostic to soaring mode numbers.
+
+\textbf{Polar best-glide EAS:} $V_{bg} = \sqrt{b/a}$ derived from the parabolic polar $\dot{h} = aV^2 + b$. This is the airspeed that minimises sink rate in still air, giving the best glide ratio.
+
+\textbf{Why here and not in the control loop:} Parameters change infrequently; computing $\sqrt{b/a}$ every 50\,Hz would waste cycles. The value is cached in TECS's \texttt{\_control\_param.gliding\_airspeed\_setpoint}.
+
+\textbf{\texttt{set\_glide\_i\_decay}:} Passes \texttt{FW\_GLIDE\_I\_DECAY} to TECS so the throttle integrator decay time constant stays synchronised with the parameter.
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 3 — \texttt{vehicle\_command\_poll()}: CUSTOM\_0 handler}
+
+\begin{lstlisting}[style=diff]
+@@ -200,6 +217,76 @@
++		} else if (vehicle_command.command == VEHICLE_CMD_CUSTOM_0) {
++			// CLI soaring command: param1 = soaring_mode integer (0–4)
++			const uint8_t new_mode = constrain((int)vehicle_command.param1,
++			    0, (int)SOARING_THERMAL_BANK);
++			_autosoaring_control.soaring_mode    = new_mode;
++			_autosoaring_control.loiter_radius_m = (vehicle_command.param3 > FLT_EPSILON)
++			    ? vehicle_command.param3 : NAN;
++			if (PX4_ISFINITE(vehicle_command.param2) && vehicle_command.param2 > FLT_EPSILON)
++			    _autosoaring_control.bank_angle_cmd = vehicle_command.param2;
+\end{lstlisting}
+\begin{annotation}Parses the MAVLink parameters packed by Commander:\\
+\texttt{param1} → soaring mode (0–4, clamped). \texttt{param2} → optional bank angle in degrees. \texttt{param3} → optional loiter radius in metres. Defaults (NaN) leave the previous or parameter-default value unchanged.\end{annotation}
+
+\begin{lstlisting}[style=diff]
++			if (enabling) {
++				_soaring_local_override       = true;  // CLI takes authority
++				_soaring_dds_inhibit_until_us = 0;     // clear any active inhibit
++				_soaring_forbidden_latched    = false;  // CLI overrides altitude latch
++				_autosoaring_last_recv_us     = 0;     // suppress watchdog
++				_soaring_expect_set_mode      = true;  // next DO_SET_MODE is paired
++				_soaring_mode_cmd_last_us     = 0;     // allow immediate DO_REPOSITION
++				_soaring_last_lat             = NAN;   // fresh thermal centre
++				_soaring_last_lon             = NAN;
+\end{lstlisting}
+\begin{annotation}
+\textbf{\texttt{\_soaring\_local\_override = true}:} CLI has authority. The DDS poll path will not overwrite \texttt{\_autosoaring\_control} while this is set.
+
+\textbf{\texttt{\_soaring\_dds\_inhibit\_until\_us = 0}:} CLI \emph{enabling} soaring clears any pending inhibit — if the operator wants soaring on, the 5-second cooldown from a previous \texttt{soar:off} is cancelled.
+
+\textbf{\texttt{\_soaring\_forbidden\_latched = false}:} CLI always overrides the altitude floor latch (a human operator is in control at that moment).
+
+\textbf{\texttt{\_autosoaring\_last\_recv\_us = 0}:} Disarms the staleness watchdog for CLI path (watchdog only fires when this is $> 0$).
+
+\textbf{\texttt{\_soaring\_expect\_set\_mode = true}:} Commander sends CUSTOM\_0 immediately followed by DO\_SET\_MODE. This flag marks the paired DO\_SET\_MODE as soaring-related so \texttt{vehicle\_command\_poll()} does not misinterpret it as a user manually switching mode (which would exit soaring).
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
++			} else {  // soar:off
++				_soaring_local_override       = false;
++				_soaring_forbidden_latched    = false;
++				_soaring_expect_set_mode      = false;
++				_soaring_dds_inhibit_until_us = hrt_absolute_time() + 5_s;
++				_autosoaring_last_recv_us     = 0;
++				_tecs.set_gliding_mode_enabled(false);
++				publish_autosoaring_status(SOURCE_CLI_SOARING_OFF, SOARING_OFF,
++				    _soaring_dds_inhibit_until_us, SOARING_PHASE_CRUISE);
++				_autosoaring_status_repub_us = hrt_absolute_time();
+\end{lstlisting}
+\begin{annotation}
+\textbf{\texttt{soar:off} actions (5 lines):}
+\begin{enumerate}
+  \item Release CLI authority so the DDS path can take over after 5\,s.
+  \item Arm the 5-second DDS inhibit (blocks companion re-enabling soaring).
+  \item Zero \texttt{\_autosoaring\_last\_recv\_us} to prevent the watchdog from triggering immediately.
+  \item Immediately tell TECS to disable gliding.
+  \item Publish \texttt{AutosoaringStatus} with \texttt{SOURCE\_CLI\_SOARING\_OFF} so the companion learns about the inhibit end time.
+  \item Initialise the 1\,Hz republish timer.
+\end{enumerate}
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		} else if (vehicle_command.command == VEHICLE_CMD_DO_SET_MODE) {
++			if (_soaring_local_override) {
++				if (_soaring_expect_set_mode) {
++					_soaring_expect_set_mode = false;  // paired → soaring stays ON
++				} else {
++					// Standalone mode switch → exit soaring
++					_autosoaring_control.soaring_mode = SOARING_OFF;
++					_soaring_local_override    = false;
++					_soaring_forbidden_latched = false;
++					_tecs.set_gliding_mode_enabled(false);
++					PX4_INFO("Autosoaring: mode switch → powered flight restored");
++				}
++			}
+\end{lstlisting}
+\begin{annotation}
+\textbf{Paired vs standalone DO\_SET\_MODE logic:} Commander sends CUSTOM\_0 and DO\_SET\_MODE back-to-back for every \texttt{soar:*} command. The \texttt{\_soaring\_expect\_set\_mode} flag distinguishes them:
+\begin{itemize}
+  \item \textbf{Paired} (\texttt{expect = true}): consume the flag, leave soaring active. The mode switch is part of the soaring enable sequence.
+  \item \textbf{Standalone} (\texttt{expect = false}): the user typed \texttt{commander mode auto:mission} manually — treat as ``exit soaring''.
+\end{itemize}
+Without this logic, every \texttt{commander mode auto:mission} while soaring (e.g.\ to skip a waypoint) would unintentionally disable soaring.
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 4 — \texttt{publish\_autosoaring\_status()} implementation}
+
+\begin{lstlisting}[style=diff]
+@@ -507,6 +594,19 @@
++void FixedwingPositionControl::publish_autosoaring_status(
++    uint8_t source, uint8_t soaring_mode_effective,
++    hrt_abstime dds_inhibit_until_us, uint8_t fmu_soaring_phase)
++{
++	autosoaring_status_s status{};
++	status.timestamp            = hrt_absolute_time();
++	status.source               = source;
++	status.soaring_mode_effective = soaring_mode_effective;
++	status.dds_inhibit_until_us = dds_inhibit_until_us;
++	status.fmu_soaring_phase    = fmu_soaring_phase;
++	_autosoaring_status_pub.publish(status);
++}
+\end{lstlisting}
+\begin{annotation}
+Single helper called from three locations: (1) \texttt{vehicle\_command\_poll()} on \texttt{soar:off}, (2) the staleness watchdog in \texttt{Run()}, and (3) the 2\,Hz heartbeat in \texttt{control\_auto()}. Zero-initialising \texttt{status\{\}} ensures no uninitialised padding bytes are published on the DDS bus.
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 5 — \texttt{control\_auto()}: soaring control block (327 added lines)}
+
+\begin{annotation}
+This is the largest addition. It runs once per control cycle inside \texttt{control\_auto()}, which is called from \texttt{Run()} whenever the vehicle is in \texttt{AUTO\_MISSION} or \texttt{AUTO\_LOITER}. The block is split into sub-sections below in the order they execute.
+\end{annotation}
+
+\subsubsection{5a — Mission resume after thermal}
+
+\begin{lstlisting}[style=diff]
++	if (_soaring_pending_mission_restore && _soaring_mission_resume_valid
++	    && (_vehicle_status.nav_state == NAVIGATION_STATE_AUTO_MISSION)) {
++		_soaring_pending_mission_restore = false;
++		vehicle_command_s restore_cmd{};
++		restore_cmd.command = VEHICLE_CMD_MISSION_START;
++		restore_cmd.param1  = (float)_soaring_mission_resume_seq;
++		_pub_vehicle_command.publish(restore_cmd);
++		_soaring_mission_resume_valid = false;
++		PX4_INFO("MISSION_START seq %u (post-thermal)", _soaring_mission_resume_seq);
++	}
+\end{lstlisting}
+\begin{annotation}
+When thermal mode ends the vehicle returns to AUTO\_MISSION. However, the mission module may have rewound its sequence during the loiter. This block publishes \texttt{VEHICLE\_CMD\_MISSION\_START} with the sequence number latched at \emph{thermal entry} to resume from the correct waypoint.
+
+The deferred check (\texttt{nav\_state == AUTO\_MISSION}) prevents a race: Commander publishes DO\_SET\_MODE asynchronously, so the nav state may still be AUTO\_LOITER on the first cycle after thermal exit. Publishing MISSION\_START before the navigator has processed the mode switch would be silently dropped.
+\end{annotation}
+
+\subsubsection{5b — Altitude and mode booleans}
+
+\begin{lstlisting}[style=diff]
++	const float current_altitude = _local_pos.z_global
++	    ? -_local_pos.z + _local_pos.ref_alt : _current_altitude;
++	const uint8_t soaring_cmd    = _autosoaring_control.soaring_mode;
++	const bool glide_cmd   = (soaring_cmd == SOARING_GLIDE_FIXED ||
++	                           soaring_cmd == SOARING_GLIDE_POLAR);
++	const bool thermal_cmd = (soaring_cmd == SOARING_THERMAL_LOITER ||
++	                           soaring_cmd == SOARING_THERMAL_BANK);
+\end{lstlisting}
+\begin{annotation}
+\textbf{\texttt{current\_altitude}:} Prefers the global-frame altitude (\texttt{z\_global}) over the filtered barometric altitude (\texttt{\_current\_altitude}) for altitude guards. This matches what QGC displays and what the companion computer uses.
+
+\textbf{\texttt{glide\_cmd} / \texttt{thermal\_cmd}:} Convenience booleans derived from \texttt{soaring\_cmd}. Used throughout the soaring block to avoid repeatedly comparing the integer mode.
+\end{annotation}
+
+\subsubsection{5c — Altitude floor guard (all paths including CLI)}
+
+\begin{lstlisting}[style=diff]
+-+	if (!_soaring_local_override && soaring_requested && current_altitude < alt_min) {
+++	if (soaring_requested && current_altitude < alt_min) {
+ +		if (!_soaring_forbidden_latched) {
+ +			_soaring_forbidden_latched = true;
+-+			PX4_WARN("Soaring disabled: below FW_ALT_MIN");
+++			if (_soaring_local_override) {
+++				_soaring_local_override  = false;
+++				_soaring_expect_set_mode = false;
+++				PX4_WARN("Soaring CLI override released: alt %.0f < FW_ALT_MIN %.0f",
+++				         current_altitude, alt_min);
+++			} else {
+++				PX4_WARN("Soaring disabled: alt %.0f < min %.0f",
+++				         current_altitude, alt_min);
+++			}
+ +		}
+-+	} else if (!soaring_requested) {
+++	}
+++	if (!soaring_requested) {
+ +		_soaring_forbidden_latched = false;
+ +	}
+ +	const bool soaring_allowed = soaring_requested
+ +	    && (_soaring_local_override || !_soaring_forbidden_latched);
+\end{lstlisting}
+\begin{annotation}
+\textbf{Original design (before fix):} The condition \texttt{!\_soaring\_local\_override} skipped the floor check when CLI was active. Rationale: ``the operator knows the altitude''. This was safe in SITL (where QGC heartbeats accidentally cleared the override), but on hardware (SIH), the QGC-heartbeat fix kept \texttt{\_soaring\_local\_override = true} permanently, so the floor was \emph{never} triggered.
+
+\textbf{Current design:} the floor check runs for \emph{all} paths.
+\begin{itemize}
+  \item \textbf{DDS path} (\texttt{\_soaring\_local\_override = false}): unchanged behaviour — sets latch, companion must send \texttt{SOARING\_OFF} to clear.
+  \item \textbf{CLI path} (\texttt{\_soaring\_local\_override = true}): additionally clears \texttt{\_soaring\_local\_override} so the glide-exit block (Section~5i) fires and publishes \texttt{DO\_SET\_MODE $\to$ AUTO\_MISSION} automatically.
+\end{itemize}
+The staleness watchdog is not affected (it already checks \texttt{\_soaring\_local\_override} independently).
+\end{annotation}
+
+\subsubsection{5d — Altitude ceiling (FW\_ALT\_MAX) hysteresis}
+
+\begin{lstlisting}[style=diff]
++	if (!_alt_max_reached && current_altitude >= alt_max) {
++		_alt_max_reached = true;
++	} else if (_alt_max_reached && current_altitude < alt_max - alt_hyst) {
++		_alt_max_reached = false;
++	}
++	const bool effective_glide   = soaring_allowed && (glide_cmd || _alt_max_reached);
++	const bool effective_thermal = soaring_allowed && thermal_cmd && !_alt_max_reached;
+\end{lstlisting}
+\begin{annotation}
+\textbf{Ceiling logic:} When altitude reaches \texttt{FW\_ALT\_MAX}, \texttt{\_alt\_max\_reached} latches to \texttt{true}. The \texttt{effective\_glide} formula uses an OR: if glide was commanded OR the ceiling was hit, glide is active. Thermal mode is suppressed while at ceiling. The latch releases only after descending below \texttt{FW\_ALT\_MAX - FW\_ALT\_HYST}, preventing rapid oscillation between glide and thermal at the ceiling.
+\end{annotation}
+
+\subsubsection{5e — TECS gliding mode update}
+
+\begin{lstlisting}[style=diff]
++	_tecs.set_gliding_mode_enabled(effective_glide || effective_thermal);
++
++	if (effective_glide || effective_thermal) {
++		const float companion_airspeed = PX4_ISFINITE(_autosoaring_control.airspeed_cmd)
++		    && _autosoaring_control.airspeed_cmd > 1.0f
++		    ? _autosoaring_control.airspeed_cmd : 0.0f;
++		if (companion_airspeed > FLT_EPSILON &&
++		    _autosoaring_control.soaring_mode == SOARING_GLIDE_FIXED) {
++			_tecs.set_gliding_airspeed_setpoint(companion_airspeed);
++		}
++	}
+\end{lstlisting}
+\begin{annotation}
+\texttt{set\_gliding\_mode\_enabled()} is called \emph{every cycle} to keep TECS in sync. The check allows the companion to override the TECS airspeed setpoint per-cycle for mode~1 (GLIDE\_FIXED) using \texttt{airspeed\_cmd}. This implements MacCready speed-to-fly: the companion computes the optimal inter-thermal airspeed and sends it each cycle. Sanity check (\texttt{> 1.0 m/s}) prevents a near-zero companion value from being applied.
+\end{annotation}
+
+\subsubsection{5f — Bank angle for thermal modes}
+
+\begin{lstlisting}[style=diff]
++	if (effective_thermal) {
++		const float companion_bank = PX4_ISFINITE(_autosoaring_control.bank_angle_cmd)
++		    ? fabsf(_autosoaring_control.bank_angle_cmd) : 0.0f;
++		_soaring_bank_angle_cmd_deg = (companion_bank > 1.0f)
++		    ? companion_bank : _param_fw_thermal_bank.get();
++	}
+\end{lstlisting}
+\begin{annotation}Resolves the effective bank angle: companion value if valid and $>1°$, otherwise the \texttt{FW\_THERMAL\_BANK} parameter default. This value is used both for the loiter radius computation in the DO\_REPOSITION path and for the direct roll override in SOARING\_THERMAL\_BANK (mode~4).\end{annotation}
+
+\subsubsection{5g — Thermal loiter: DO\_REPOSITION to navigator}
+
+\begin{lstlisting}[style=diff]
++	if (effective_thermal) {
++		// Compute minimum loiter radius from bank angle: r_min = V^2 / (g * tan(bank))
++		const float v_loiter = _param_fw_glide_airspd.get();
++		const float bank_rad = math::radians(_soaring_bank_angle_cmd_deg);
++		const float r_min = (v_loiter * v_loiter) /
++		    (CONSTANTS_ONE_G * math::max(tanf(bank_rad), 0.01f));
++
++		const float loiter_radius = PX4_ISFINITE(_autosoaring_control.loiter_radius_m)
++		    && _autosoaring_control.loiter_radius_m > r_min
++		    ? _autosoaring_control.loiter_radius_m : r_min;
+\end{lstlisting}
+\begin{annotation}
+Computes the aerodynamically-limited minimum loiter radius from the bank angle. If the companion requests a tighter radius it is silently clamped to \texttt{r\_min} to avoid stall. The formula $r = V^2 / (g \tan\phi)$ is the standard coordinated-turn radius equation.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		const double lat = PX4_ISFINITE(_autosoaring_control.loiter_lat)
++		    && fabsf(_autosoaring_control.loiter_lat) > FLT_EPSILON
++		    ? (double)_autosoaring_control.loiter_lat : _current_latitude;
++		const double lon = PX4_ISFINITE(_autosoaring_control.loiter_lon)
++		    && fabsf(_autosoaring_control.loiter_lon) > FLT_EPSILON
++		    ? (double)_autosoaring_control.loiter_lon : _current_longitude;
++
++		const bool centre_changed = (fabs(lat - _soaring_last_lat) > 1e-6 ||
++		                             fabs(lon - _soaring_last_lon) > 1e-6);
++		const bool dir_changed = (_autosoaring_control.loiter_clockwise != _soaring_last_clockwise);
+\end{lstlisting}
+\begin{annotation}
+Resolves the thermal centre: companion-provided coordinates if valid and non-zero, otherwise current aircraft position. Change detection (\texttt{centre\_changed}, \texttt{dir\_changed}) prevents sending a new \texttt{DO\_REPOSITION} every cycle — only when the centre or direction actually moves.
+\end{annotation}
+
+\begin{lstlisting}[style=diff]
++		if ((centre_changed || dir_changed) &&
++		    (hrt_absolute_time() - _soaring_mode_cmd_last_us) > 1_s) {
++			_soaring_mode_cmd_last_us = hrt_absolute_time();
++			_soaring_last_lat         = lat;
++			_soaring_last_lon         = lon;
++			_soaring_last_clockwise   = _autosoaring_control.loiter_clockwise;
++
++			// Mission index latch: save seq at first DO_REPOSITION so we can
++			// resume the mission after thermal exit.
++			if (!_soaring_mission_resume_valid) {
++				mission_s mission_snap{};
++				if (_mission_sub.copy(&mission_snap)) {
++					_soaring_mission_resume_seq   = mission_snap.current_seq;
++					_soaring_mission_resume_valid = true;
++				}
++			}
++
++			vehicle_command_s cmd{};
++			cmd.command = VEHICLE_CMD_DO_REPOSITION;
++			cmd.param1  = -1.f;           // speed: -1 = use default
++			cmd.param2  = 1.f;            // change loiter AND mode
++			cmd.param3  = loiter_radius * (_autosoaring_control.loiter_clockwise ? 1.f : -1.f);
++			cmd.param5  = lat;            // latitude
++			cmd.param6  = lon;            // longitude
++			cmd.param7  = current_altitude;
++			_pub_vehicle_command.publish(cmd);
++		}
++	}
+\end{lstlisting}
+\begin{annotation}
+\textbf{1-second debounce} (\texttt{\_soaring\_mode\_cmd\_last\_us}): The companion may publish at several Hz. Without debouncing, the navigator would receive a flood of DO\_REPOSITION commands, causing instability. One command per second is sufficient for thermal tracking.
+
+\textbf{Mission resume latch}: On the \emph{first} DO\_REPOSITION (thermal entry), the current mission sequence is saved. On thermal exit (next section), a \texttt{VEHICLE\_CMD\_MISSION\_START} is sent with this sequence.
+
+\textbf{Signed radius in param3}: Convention defined in \texttt{navigator\_main.cpp} — positive = CW, negative = CCW (Section~10).
+\end{annotation}
+
+\subsubsection{5h — Thermal exit: return to AUTO\_MISSION}
+
+\begin{lstlisting}[style=diff]
++	if (_soaring_was_thermal && !effective_thermal && !effective_glide) {
++		// Thermal just ended AND not transitioning to glide → restore mission.
++		vehicle_command_s exit_cmd{};
++		exit_cmd.command = VEHICLE_CMD_DO_SET_MODE;
++		exit_cmd.param1  = 1.f;                        // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
++		exit_cmd.param2  = (float)PX4_CUSTOM_MAIN_MODE_AUTO;
++		exit_cmd.param3  = (float)PX4_CUSTOM_SUB_MODE_AUTO_MISSION;
++		_pub_vehicle_command.publish(exit_cmd);
++		_soaring_local_override    = false;
++		_soaring_forbidden_latched = false;
++		_soaring_last_lat = NAN;  // reset thermal centre cache
++		_soaring_last_lon = NAN;
++		_soaring_last_clockwise = true;
++		if (_soaring_mission_resume_valid) {
++			_soaring_pending_mission_restore = true;
++		}
++		PX4_INFO("Autosoaring: thermal ended -> AUTO_MISSION");
++	}
+\end{lstlisting}
+\begin{annotation}
+\textbf{Condition:} \texttt{\_soaring\_was\_thermal} (previous cycle) AND \texttt{!effective\_thermal} AND \texttt{!effective\_glide} (current cycle). This detects the falling edge of thermal mode when the aircraft is also not entering glide (i.e.\ returning to powered flight).
+
+\textbf{\texttt{DO\_SET\_MODE} published from \texttt{fw\_pos\_control}:} Normally only Commander publishes mode-switch commands. This is an exception: the FMU spontaneously exits thermal when the companion turns off soaring, so no CLI command is available. Publishing from \texttt{fw\_pos\_control} is safe because \texttt{\_soaring\_expect\_set\_mode = false} so \texttt{vehicle\_command\_poll()} will not misinterpret it.
+
+\textbf{\texttt{\_soaring\_pending\_mission\_restore = true}:} Defers the MISSION\_START command until nav\_state is actually AUTO\_MISSION (Hunk~5a handles this).
+\end{annotation}
+
+\subsubsection{5i (new) — Glide exit: return to AUTO\_MISSION}
+
+This block is new and mirrors 5h for the \emph{glide} case.
+
+\begin{lstlisting}[style=diff]
++	const bool soaring_was_glide_only =
++	    _soaring_was_glide && !_soaring_was_thermal;
++
++	if (soaring_was_glide_only && !effective_glide && !effective_thermal) {
++		vehicle_command_s cmd{};
++		cmd.command = VEHICLE_CMD_DO_SET_MODE;
++		cmd.param1  = 1.f;
++		cmd.param2  = (float)PX4_CUSTOM_MAIN_MODE_AUTO;
++		cmd.param3  = (float)PX4_CUSTOM_SUB_MODE_AUTO_MISSION;
++		_pub_vehicle_command.publish(cmd);
++		_soaring_local_override    = false;
++		_soaring_forbidden_latched = false;
++		PX4_INFO("Autosoaring: glide ended -> AUTO_MISSION");
++	}
++
++	_soaring_was_glide        = effective_glide;
++	_soaring_was_thermal      = effective_thermal;
++	_soaring_was_bank_thermal = effective_thermal_bank;
+\end{lstlisting}
+\begin{annotation}
+\textbf{Why glide needs its own exit block.}
+In glide mode the navigator is already in AUTO\_MISSION (it was never switched to AUTO\_LOITER). So ``returning to mission'' means:
+\begin{enumerate}
+  \item TECS re-enables throttle (\texttt{effective\_glide = false} causes \texttt{set\_gliding\_mode\_enabled(false)} on the same cycle).
+  \item Navigator setpoints resume normally — no explicit mode switch is strictly necessary.
+  \item However, republishing \texttt{DO\_SET\_MODE(AUTO\_MISSION)} forces the navigator to re-evaluate its setpoints, preventing it from coasting on the last glide-era setpoint.
+\end{enumerate}
+
+\textbf{\texttt{soaring\_was\_glide\_only}:} The guard \texttt{!\_soaring\_was\_thermal} prevents a double-fire when thermal-loiter ends and simultaneously \texttt{effective\_glide} is false — that case is already handled by block 5h.
+
+\textbf{State update placement:} \texttt{\_soaring\_was\_glide}, \texttt{\_soaring\_was\_thermal}, and \texttt{\_soaring\_was\_bank\_thermal} are all updated \emph{after} both exit blocks. This ensures the guards (\texttt{\_soaring\_was\_thermal}, \texttt{soaring\_was\_glide\_only}) see the \emph{previous} cycle's values, not the current cycle's.
+
+\textbf{Interaction with \texttt{vehicle\_command\_poll()}:} \texttt{\_soaring\_local\_override} is cleared before returning, so when the \texttt{DO\_SET\_MODE} loops back through \texttt{vehicle\_command\_poll()}, it is treated as a normal mode switch and does not erroneously call \texttt{set\_gliding\_mode\_enabled(false)} again (soaring is already off at that point).
+\end{annotation}
+
+\subsubsection{5i — 2\,Hz phase heartbeat}
+
+\begin{lstlisting}[style=diff]
++	if (phase_now - _autosoaring_status_periodic_us >= 500_ms) {
++		_autosoaring_status_periodic_us = phase_now;
++		uint8_t fmu_phase;
++		if (effective_thermal)
++			fmu_phase = PX4_ISFINITE(_soaring_last_lat)
++			            ? SOARING_PHASE_THERMAL : SOARING_PHASE_SEARCHING;
++		else if (effective_glide)
++			fmu_phase = SOARING_PHASE_GLIDING;
++		else
++			fmu_phase = SOARING_PHASE_CRUISE;
++		publish_autosoaring_status(SOURCE_PERIODIC,
++		    _autosoaring_control.soaring_mode,
++		    _soaring_dds_inhibit_until_us, fmu_phase);
++	}
+\end{lstlisting}
+\begin{annotation}
+Published every 500\,ms regardless of whether soaring is active. This means the companion always receives a fresh status even during powered cruise (\texttt{SOARING\_PHASE\_CRUISE}). The phase is derived from the real internal booleans \emph{after} altitude guards and ceiling logic have been applied, so it reflects what the FMU is genuinely doing — not just what was commanded.
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 6 — \texttt{Run()}: DDS poll, watchdog, inhibit republish}
+
+\subsubsection{6a — DDS poll}
+
+\begin{lstlisting}[style=diff]
++		if (_autosoaring_control_sub.update(&soaring_msg)) {
++			const bool dds_inhibited    = (_soaring_dds_inhibit_until_us > 0
++			                               && now < _soaring_dds_inhibit_until_us);
++			const bool dds_wants_soaring = (soaring_msg.soaring_mode != SOARING_OFF);
++
++			if (dds_inhibited && dds_wants_soaring) {
++				// inhibit active: drop this message silently
++			} else {
++				if (!dds_wants_soaring) _soaring_dds_inhibit_until_us = 0;
++				if (!_soaring_local_override) {
++					const bool prev_thermal = ...;
++					const bool new_thermal  = ...;
++					_autosoaring_control      = soaring_msg;
++					_autosoaring_last_recv_us = now;
++					if (!prev_thermal && new_thermal) {
++						_soaring_mode_cmd_last_us = 0;  // reset debounce
++						_soaring_last_lat = NAN;
++						_soaring_last_lon = NAN;
++					}
++				}
++			}
++		}
+\end{lstlisting}
+\begin{annotation}
+\textbf{Inhibit logic:} If the 5-second \texttt{soar:off} cooldown is active and the companion is trying to re-enable soaring, the message is silently dropped. After 5\,s the inhibit expires and the companion regains control automatically.
+
+\textbf{DDS cancel:} If the companion explicitly sends \texttt{soaring\_mode = 0}, the inhibit is cancelled (the companion acknowledged the \texttt{soar:off}).
+
+\textbf{Thermal transition reset:} When switching from non-thermal to thermal, the DO\_REPOSITION debounce and loiter centre cache are reset so the first thermal position fires immediately.
+
+\textbf{CLI authority check:} \texttt{\_soaring\_local\_override} prevents DDS from overwriting \texttt{\_autosoaring\_control} while the CLI is in command.
+\end{annotation}
+
+\subsubsection{6b — Staleness watchdog}
+
+\begin{lstlisting}[style=diff]
++		if (!_soaring_local_override
++		    && _autosoaring_last_recv_us > 0
++		    && (hrt_absolute_time() - _autosoaring_last_recv_us) > 2_s) {
++			_autosoaring_control.soaring_mode = SOARING_OFF;
++			publish_autosoaring_status(SOURCE_STALENESS_WATCHDOG, SOARING_OFF, 0, SOARING_PHASE_CRUISE);
++			_tecs.set_gliding_mode_enabled(false);
++			_autosoaring_last_recv_us = 0;
++		}
+\end{lstlisting}
+\begin{annotation}
+Fires only on the DDS path (\texttt{\_soaring\_local\_override = false}) and only when \texttt{\_autosoaring\_last\_recv\_us > 0} (a DDS message was previously received). Prevents the aircraft from remaining in engine-off glide indefinitely if the companion crashes or the DDS link is lost.
+
+Resetting \texttt{\_autosoaring\_last\_recv\_us = 0} disarms the watchdog so it fires only once per silence event.
+\end{annotation}
+
+\subsubsection{6c — 1\,Hz inhibit republish}
+
+\begin{lstlisting}[style=diff]
++		if (_soaring_dds_inhibit_until_us > 0 && status_now < _soaring_dds_inhibit_until_us) {
++			if (status_now - _autosoaring_status_repub_us >= 1_s) {
++				_autosoaring_status_repub_us = status_now;
++				publish_autosoaring_status(SOURCE_CLI_SOARING_OFF,
++				    _autosoaring_control.soaring_mode,
++				    _soaring_dds_inhibit_until_us, SOARING_PHASE_CRUISE);
++			}
++		} else {
++			_autosoaring_status_repub_us = 0;
++		}
+\end{lstlisting}
+\begin{annotation}
+After \texttt{soar:off}, the companion must know the exact inhibit end time. If the single one-shot status message is lost due to DDS packet loss, the companion would not know when it can re-enable soaring. Republishing at 1\,Hz for 5\,s ensures the companion receives at least 4 copies. The \texttt{else} branch resets the timer once the inhibit expires.
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 7 — SOARING\_THERMAL\_BANK: bypass NPFG}
+
+\begin{lstlisting}[style=diff]
++	if (effective_thermal_bank) {
++		// Skip the switch(position_sp_type) entirely for mode 4.
++		// Run TECS directly with the glide airspeed; roll is overridden directly.
++		tecs_update_pitch_throttle(control_interval, current_altitude,
++		    _param_fw_glide_airspd.get(), ...);
++		const float bank_sign = _autosoaring_control.loiter_clockwise ? 1.f : -1.f;
++		const float bank_rad  = bank_sign * radians(_soaring_bank_angle_cmd_deg);
++		const Quatf q_bank(Eulerf(bank_rad, get_tecs_pitch(), _yaw));
++		q_bank.copyTo(_att_sp.q_d);
++	} else {
++		switch (position_sp_type) { ... }   // normal path
++	}
+\end{lstlisting}
+\begin{annotation}
+\textbf{Why bypass NPFG:} In mode~4 the companion controls the loiter center via bank angle directly. If \texttt{control\_auto\_loiter()} is called first, NPFG computes an airspeed reference contaminated by the loiter geometry, which TECS uses for pitch. Even though roll is overridden afterward, TECS pitch is wrong. Skipping the switch avoids NPFG entirely.
+
+\textbf{Direct roll:} The attitude setpoint is built from a plain Euler angle (\texttt{bank\_rad}, TECS pitch, current yaw). Sign encodes CW (+) vs CCW (−).
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 8 — Throttle ramps (glide entry and exit)}
+
+\begin{lstlisting}[style=diff]
++	const bool currently_soaring = _tecs.get_gliding_mode_enabled();
++	const float ramp_t = _param_fw_glide_ramp_t.get();
++
++	// Cache pre-glide thrust (1-cycle lag, negligible for 2 s ramp)
++	if (!currently_soaring && !_landed) {
++		_soaring_pre_glide_thrust    = get_tecs_thrust();
++		_soaring_entry_ramp_start_us = 0;
++	} else if (!_soaring_was_active && currently_soaring
++	           && _soaring_entry_ramp_start_us == 0) {
++		_soaring_entry_ramp_start_us = hrt_absolute_time();  // glide started: begin entry ramp
++	}
++
++	if (currently_soaring) {
++		_soaring_ramp_start_us = 0;
++	} else if (_soaring_was_active && _soaring_ramp_start_us == 0) {
++		_soaring_ramp_start_us = hrt_absolute_time();        // glide ended: begin exit ramp
++	}
++
++	float exit_ramp_scale = 1.0f;
++	if (_soaring_ramp_start_us > 0 && ramp_t > FLT_EPSILON) {
++		const float t = (hrt_absolute_time() - _soaring_ramp_start_us) * 1e-6f;
++		exit_ramp_scale = (t < ramp_t) ? t / ramp_t : (void)(_soaring_ramp_start_us=0), 1.0f;
++	}
++
++	float entry_throttle = 0.0f;
++	if (_soaring_entry_ramp_start_us > 0 && ramp_t > FLT_EPSILON) {
++		const float t = (hrt_absolute_time() - _soaring_entry_ramp_start_us) * 1e-6f;
++		entry_throttle = (t < ramp_t) ? _soaring_pre_glide_thrust * (1.0f - t / ramp_t)
++		                              : (void)(_soaring_entry_ramp_start_us=0), 0.0f;
++	}
++
++	_soaring_was_active = currently_soaring;
++
++	} else if (currently_soaring) {
++		_att_sp.thrust_body[0] = entry_throttle;  // 0 in steady glide; >0 while ramping down
++	} else {
++		_att_sp.thrust_body[0] = tecs_thr * exit_ramp_scale;  // ramping up after glide exit
++	}
+\end{lstlisting}
+\begin{annotation}
+\textbf{Entry ramp} (powered $\to$ glide): throttle ramps from \texttt{\_soaring\_pre\_glide\_thrust} (the last powered TECS value) down to 0 over \texttt{FW\_GLIDE\_RAMP\_T} seconds. Prevents the propwash collapse pitch transient.
+
+\textbf{Exit ramp} (glide $\to$ powered): TECS throttle is scaled by a factor that grows from 0 to 1 over \texttt{FW\_GLIDE\_RAMP\_T} seconds. Prevents the propwash surge pitch transient on engine restart.
+
+\textbf{State machine:} Both timers are mutually exclusive (\texttt{\_soaring\_ramp\_start\_us} and \texttt{\_soaring\_entry\_ramp\_start\_us}). \texttt{\_soaring\_was\_active} is the previous-cycle glide state; comparing it to \texttt{currently\_soaring} gives the rising and falling edge detection.
+\end{annotation}
+
+%------------------------------------------------------------------------------
+\subsection{Hunk 9 — Remove five \texttt{pos\_sp\_curr.gliding\_enabled} blocks}
+
+\begin{lstlisting}[style=diff]
+-	if (pos_sp_curr.gliding_enabled) {
+-		_tecs.set_speed_weight(2.0f);
+-		tecs_fw_thr_min = 0.0;
+-		tecs_fw_thr_max = 0.0;
+-	} else {
+-		tecs_fw_thr_min = _param_fw_thr_min.get();
+-		tecs_fw_thr_max = _param_fw_thr_max.get();
+-	}
++	// Now handled internally by TECS (gliding_mode_enabled flag).
++	tecs_fw_thr_min = _param_fw_thr_min.get();
++	tecs_fw_thr_max = _param_fw_thr_max.get();
+\end{lstlisting}
+\begin{annotation}
+This block appears \textbf{five times} (in \texttt{control\_auto\_position}, \texttt{control\_auto\_velocity}, \texttt{control\_auto\_loiter}, and two landing functions). In the original code, gliding was activated per-waypoint via a boolean flag \texttt{pos\_sp\_curr.gliding\_enabled} set by the mission. This mechanism has been superseded:
+
+\begin{itemize}
+  \item \texttt{\_tecs.set\_speed\_weight(2.0f)} is now handled inside \texttt{\_updateSpeedAltitudeWeights()} when \texttt{gliding\_mode\_enabled} is set.
+  \item \texttt{tecs\_fw\_thr\_min = 0} is now handled inside \texttt{\_calcThrottleControlOutput()} which returns \texttt{throttle\_min} directly.
+  \item The new mechanism is mode-independent: gliding works in any flight phase (mission, loiter, etc.) without per-function boilerplate.
+\end{itemize}
+\end{annotation}
+
+%==============================================================================
+\section{Complete data-flow summary}
+%==============================================================================
+
+\begin{verbatim}
+Companion (ROS 2)                     FMU (PX4)
+────────────────────────────────────────────────────────────
+
+[1] Enable glide via DDS
+ros2 topic pub /fmu/in/autosoaring_control
+  soaring_mode: 1
+        │
+        │ XRCE-DDS bridge
+        ▼
+  ORB_ID(autosoaring_control)
+        │
+        ▼
+  fw_pos_control::autosoaring_control_poll()
+    ├─ check _soaring_dds_inhibit_until_us  (if inhibit active → DROP)
+    ├─ check altitude floor FW_ALT_MIN      (if too low → latch + DROP)
+    └─ _autosoaring_control = soaring_msg   → effective_glide = true
+        │
+        ▼
+  TECS::set_gliding_mode_enabled(true)
+  TECS::set_gliding_airspeed_setpoint(EAS)
+        │
+        ▼
+  7 TECS gliding modifications active
+  fw_pos_control publishes AutosoaringStatus (SOURCE_PERIODIC, 2 Hz)
+        │
+        │ XRCE-DDS bridge
+        ▼
+  /fmu/out/autosoaring_status
+  fmu_soaring_phase: 1  (GLIDING)
+
+────────────────────────────────────────────────────────────
+
+[2] Operator disables soaring via CLI
+pxh> commander mode soar:off
+        │
+        ▼
+  VEHICLE_CMD_CUSTOM_0 (param1=0)
+        │
+        ▼
+  fw_pos_control::vehicle_command_poll()
+    ├─ soaring_mode ← SOARING_OFF
+    ├─ _soaring_dds_inhibit_until_us = now + 5 s
+    ├─ _autosoaring_last_recv_us = 0  (suppress watchdog)
+    └─ publish_autosoaring_status(SOURCE_CLI_SOARING_OFF,
+           SOARING_OFF, inhibit_end, SOARING_PHASE_CRUISE)
+        │
+        │ 1 Hz republish for 5 s (packet-loss robustness)
+        ▼
+  /fmu/out/autosoaring_status
+  source: 0   dds_inhibit_until_us: <nonzero>
+
+────────────────────────────────────────────────────────────
+
+[3] Companion silent > 2 s (staleness watchdog)
+  fw_pos_control::Run()
+    ├─ _autosoaring_last_recv_us > 0 && silence > 2 s
+    └─ publish_autosoaring_status(SOURCE_STALENESS_WATCHDOG,
+           SOARING_OFF, 0, SOARING_PHASE_CRUISE)
+        │
+        ▼
+  /fmu/out/autosoaring_status
+  source: 1   soaring_mode_effective: 0
+\end{verbatim}
+
+\end{document}

@@ -250,7 +250,7 @@ void TECSControl::initialize(const Setpoint &setpoint, const Input &input, Param
 
 	_ste_rate_estimate_filter.reset(specific_energy_rate.spe_rate.estimate + specific_energy_rate.ske_rate.estimate);
 
-	ControlValues ste_rate{_calcThrottleControlSteRate(limit, specific_energy_rate, param)};
+	ControlValues ste_rate{_calcThrottleControlSteRate(limit, specific_energy_rate, param, flag)};
 
 	_throttle_setpoint = _calcThrottleControlOutput(limit, ste_rate, param, flag);
 
@@ -305,7 +305,8 @@ void TECSControl::update(const float dt, const Setpoint &setpoint, const Input &
 TECSControl::STERateLimit TECSControl::_calculateTotalEnergyRateLimit(const Param &param) const
 {
 	TECSControl::STERateLimit limit;
-	// Calculate the specific total energy rate limits from the max throttle limits
+	// Energy limits define the valid flight envelope in all modes including gliding.
+	// Gliding energy management is handled by throttle zeroing and energy weighting, not by changing these limits.
 	limit.STE_rate_max = math::max(param.max_climb_rate, FLT_EPSILON) * CONSTANTS_ONE_G;
 	limit.STE_rate_min = - math::max(param.min_sink_rate, FLT_EPSILON) * CONSTANTS_ONE_G;
 
@@ -323,9 +324,18 @@ float TECSControl::_calcAirspeedControlOutput(const Setpoint &setpoint, const In
 	// if airspeed measurement is not enabled then always set the rate setpoint to zero in order to avoid constant rate setpoints
 	if (flag.airspeed_enabled) {
 		// Calculate limits for the demanded rate of change of speed based on physical performance limits
-		// with a 50% margin to allow the total energy controller to correct for errors. Increase it in case of fast descend
-		const float max_tas_rate_sp = (param.fast_descend * 0.5f + 0.5f) * limit.STE_rate_max / math::max(input.tas,
-					      FLT_EPSILON);
+		// with a 50% margin to allow the total energy controller to correct for errors. Increase it in case of fast descend.
+		//
+		// In gliding mode no thrust is available, so the only energy source for acceleration is gravity
+		// (trading altitude for speed by pitching down).  The achievable energy rate is bounded by the
+		// maximum sink rate (|STE_rate_min|), NOT by STE_rate_max which is derived from max_climb_rate
+		// (a powered-flight value).  Using the powered limit would allow the setpoint to demand kinetic
+		// energy gains that are physically impossible without thrust, producing spurious pitch transients.
+		const float available_accel_energy_rate = flag.gliding_mode_enabled
+				? fabsf(limit.STE_rate_min)   // gravity-only: bounded by glide polar sink rate
+				: limit.STE_rate_max;          // powered: bounded by max climb rate
+		const float max_tas_rate_sp = (param.fast_descend * 0.5f + 0.5f) * available_accel_energy_rate
+					      / math::max(input.tas, FLT_EPSILON);
 		const float min_tas_rate_sp = (param.fast_descend * 0.5f + 0.5f) * limit.STE_rate_min / math::max(input.tas,
 					      FLT_EPSILON);
 		airspeed_rate_output = constrain((setpoint.tas_setpoint - input.tas) * param.airspeed_error_gain, min_tas_rate_sp,
@@ -370,6 +380,18 @@ void TECSControl::_detectUnderspeed(const Input &input, const Param &param, cons
 		return;
 	}
 
+	// In gliding mode the airspeed setpoint is FW_GLIDE_AIRSPD, which is deliberately
+	// lower than the cruise trim speed.  The underspeed boundary is computed relative to
+	// tas_min and param.equivalent_airspeed_trim (cruise), so glide speed would fall
+	// inside the "starting to underspeed" zone and produce a non-zero _ratio_undersped.
+	// That falsely activates underspeed mitigation (which tries to raise throttle and
+	// force speed-on-elevator weighting) even though both are already correctly set by
+	// the gliding flag.  Clear the ratio and return to keep the control path clean.
+	if (flag.gliding_mode_enabled) {
+		_ratio_undersped = 0.0f;
+		return;
+	}
+
 	// this is the expected (something like standard) deviation from the airspeed setpoint that we allow the airspeed
 	// to vary in before ramping in underspeed mitigation
 	const float tas_error_bound = param.tas_error_percentage * param.equivalent_airspeed_trim;
@@ -390,6 +412,14 @@ TECSControl::SpecificEnergyWeighting TECSControl::_updateSpeedAltitudeWeights(co
 {
 
 	SpecificEnergyWeighting weight;
+
+	
+	if (flag.gliding_mode_enabled) {
+		weight.spe_weighting = 0.0f;  // altitude not controlled by pitch in glide
+		weight.ske_weighting = 2.0f;  // full speed control via pitch
+		return weight;
+	}
+
 	// Calculate the weight applied to control of specific kinetic energy error
 	float pitch_speed_weight = constrain(param.pitch_speed_weight, 0.0f, 2.0f);
 
@@ -412,8 +442,34 @@ TECSControl::SpecificEnergyWeighting TECSControl::_updateSpeedAltitudeWeights(co
 }
 
 void TECSControl::_calcPitchControl(float dt, const Input &input, const SpecificEnergyRates &specific_energy_rates,
-				    const Param &param, const Flag &flag)
+			    const Param &param, const Flag &flag)
 {
+	// Detect glide entry/exit transitions and partially reset the pitch integrator.
+	//
+	// ENTRY (powered → glide): the cruise pitch integrator holds an altitude-control
+	// bias (w_spe > 0 trim).  When gliding starts, pitch switches to speed-on-elevator
+	// (w_ske = 2, w_spe = 0).  That bias now fights the speed setpoint, causing an
+	// airspeed overshoot for the first few seconds.  Halving it on entry removes most
+	// of the mismatch while retaining CG/trim knowledge.
+	//
+	// EXIT (glide → powered): the glide pitch integrator has wound up to hold the glide
+	// airspeed at zero throttle (speed-control bias).  When throttle ramps back in, the
+	// total energy rises quickly while this integrator still commands a nose-down pitch,
+	// producing a large pitch-rate spike (~50 deg/s) before the integrator decays.
+	// Halving it on exit suppresses the spike symmetrically.
+	//
+	// Partial reset (×0.5): fast handover without fully discarding steady-state trim.
+	if (flag.gliding_mode_enabled && !_prev_gliding_mode) {
+		// glide entry
+		_pitch_integ_state *= 0.5f;
+
+	} else if (!flag.gliding_mode_enabled && _prev_gliding_mode) {
+		// glide exit — mirror reset to damp the pitch-rate spike on power restoration
+		_pitch_integ_state *= 0.5f;
+	}
+
+	_prev_gliding_mode = flag.gliding_mode_enabled;
+
 	const SpecificEnergyWeighting weight{_updateSpeedAltitudeWeights(param, flag)};
 	ControlValues seb_rate{_calcPitchControlSebRate(weight, specific_energy_rates)};
 
@@ -460,9 +516,10 @@ TECSControl::ControlValues TECSControl::_calcPitchControlSebRate(const SpecificE
 void TECSControl::_calcPitchControlUpdate(float dt, const Input &input, const ControlValues &seb_rate,
 		const Param &param)
 {
+	
 	if (param.integrator_gain_pitch > FLT_EPSILON) {
 
-		// Calculate derivative from change in climb angle to rate of change of specific energy balance
+		// Normalisation: ΔSEB_rate / Δpitch ≈ TAS × g  (small-angle, SPE-dominant, Lambregts 1983)
 		const float climb_angle_to_SEB_rate = input.tas * CONSTANTS_ONE_G;
 
 		// Calculate pitch integrator input term
@@ -520,7 +577,7 @@ void TECSControl::_calcThrottleControl(float dt, const SpecificEnergyRates &spec
 	const float STE_rate_estimate_raw = specific_energy_rates.spe_rate.estimate + specific_energy_rates.ske_rate.estimate;
 	_ste_rate_estimate_filter.setParameters(dt, param.ste_rate_time_const);
 	_ste_rate_estimate_filter.update(STE_rate_estimate_raw);
-	ControlValues ste_rate{_calcThrottleControlSteRate(limit, specific_energy_rates, param)};
+	ControlValues ste_rate{_calcThrottleControlSteRate(limit, specific_energy_rates, param, flag)};
 	float throttle_setpoint{param.throttle_min};
 
 	if (1.f - param.fast_descend < FLT_EPSILON) {
@@ -550,7 +607,7 @@ void TECSControl::_calcThrottleControl(float dt, const SpecificEnergyRates &spec
 
 TECSControl::ControlValues TECSControl::_calcThrottleControlSteRate(const STERateLimit &limit,
 		const SpecificEnergyRates &specific_energy_rates,
-		const Param &param) const
+		const Param &param, const Flag &flag) const
 {
 	// Output ste rate values
 	ControlValues ste_rate;
@@ -558,8 +615,12 @@ TECSControl::ControlValues TECSControl::_calcThrottleControlSteRate(const STERat
 
 	// Adjust the demanded total energy rate to compensate for induced drag rise in turns.
 	// Assume induced drag scales linearly with normal load factor.
-	// The additional normal load factor is given by (1/cos(bank angle) - 1)
-	ste_rate.setpoint += param.load_factor_correction * (param.load_factor - 1.f);
+	// The additional normal load factor is given by (1/cos(bank angle) - 1).
+	// Skip this correction in gliding: throttle is hard-zero anyway, so the correction
+	// only contaminates the STE debug signal without affecting the output.
+	if (!flag.gliding_mode_enabled) {
+		ste_rate.setpoint += param.load_factor_correction * (param.load_factor - 1.f);
+	}
 
 	ste_rate.setpoint = constrain(ste_rate.setpoint, limit.STE_rate_min, limit.STE_rate_max);
 	ste_rate.estimate = _ste_rate_estimate_filter.getState();
@@ -570,6 +631,13 @@ TECSControl::ControlValues TECSControl::_calcThrottleControlSteRate(const STERat
 void TECSControl::_calcThrottleControlUpdate(float dt, const STERateLimit &limit, const ControlValues &ste_rate,
 		const Param &param, const Flag &flag)
 {
+	
+	if (flag.gliding_mode_enabled) {
+		const float decay = math::max(param.glide_i_decay, 0.1f);
+		_throttle_integ_state -= dt * _throttle_integ_state / decay;
+		return;
+	}
+
 	// Calculate gain scaler from specific energy rate error to throttle
 	const float STE_rate_to_throttle = 1.0f / (limit.STE_rate_max - limit.STE_rate_min);
 
@@ -603,6 +671,11 @@ float TECSControl::_calcThrottleControlOutput(const STERateLimit &limit, const C
 		const Param &param,
 		const Flag &flag) const
 {
+
+	if (flag.gliding_mode_enabled) {
+		return param.throttle_min;
+	}
+
 	// Calculate gain scaler from specific energy rate error to throttle
 	const float STE_rate_to_throttle = 1.0f / (limit.STE_rate_max - limit.STE_rate_min);
 
@@ -675,6 +748,33 @@ void TECS::initControlParams(float target_climbrate, float target_sinkrate, floa
 
 float TECS::calcTrueAirspeedSetpoint(float eas_to_tas, float eas_setpoint)
 {
+	if (_control_flag.gliding_mode_enabled) {
+		// gliding_airspeed_setpoint is pre-computed by FixedwingPositionControl:
+		//   SOARING_GLIDE_FIXED  → FW_GLIDE_AIRSPD (or companion airspeed_cmd)
+		//   SOARING_GLIDE_POLAR  → sqrt(FW_POLAR_B / FW_POLAR_A)  (best-glide EAS)
+		//   SOARING_THERMAL_*    → FW_GLIDE_AIRSPD (speed held during thermalling)
+		// TECS only needs to convert EAS → TAS and apply the banked stall floor.
+		if (_control_param.gliding_airspeed_setpoint > FLT_EPSILON &&
+		    PX4_ISFINITE(_control_param.gliding_airspeed_setpoint)) {
+			const float tas_sp = eas_to_tas * _control_param.gliding_airspeed_setpoint;
+
+			// In glide mode underspeed detection is already bypassed (_ratio_undersped = 0),
+			// so tas_min (the powered-flight minimum from FW_AIRSPD_MIN) must NOT be
+			// applied here — it would silently floor FW_GLIDE_AIRSPD to FW_AIRSPD_MIN.
+			// Use tas_max as upper bound and FW_AIRSPD_STALL (converted to TAS) as the
+			// hard absolute minimum. The banked stall floor (load_factor) is retained
+			// for safety in turns.
+			const float tas_stall   = eas_to_tas * _control_param.glide_stall_eas;
+			const float glide_floor = math::max(tas_stall,
+							    _control_param.tas_min * sqrtf(_control_param.load_factor) * 0.5f);
+			return math::constrain(tas_sp, glide_floor, _control_param.tas_max);
+		}
+
+		PX4_WARN("TECS glide: airspeed setpoint invalid, falling back to trim speed");
+		return math::constrain(eas_to_tas * _control_param.equivalent_airspeed_trim,
+				       _control_param.tas_min, _control_param.tas_max);
+	}
+
 	return lerp(eas_to_tas * eas_setpoint, _control_param.tas_max, _fast_descend);
 }
 
@@ -740,8 +840,16 @@ void TECS::update(float pitch, float altitude, float hgt_setpoint, float EAS_set
 		_airspeed_filter.update(dt, airspeed_input, _airspeed_filter_param, _control_flag.airspeed_enabled);
 
 		// Update Reference model submodule
-		if (1.f - _fast_descend < FLT_EPSILON) {
-			// Reset the altitude reference model, while we are in fast descend.
+		if (_control_flag.gliding_mode_enabled) {
+	
+			const TECSAltitudeReferenceModel::AltitudeReferenceState frozen_state{
+				.alt = altitude,
+				.alt_rate = hgt_rate};
+			_altitude_reference_model.initialize(frozen_state);
+
+		} else 
+		 if (1.f - _fast_descend < FLT_EPSILON) {
+			// Reset the altitude reference model while in fast descend.
 			const TECSAltitudeReferenceModel::AltitudeReferenceState init_state{
 				.alt = altitude,
 				.alt_rate = hgt_rate};
@@ -758,6 +866,7 @@ void TECS::update(float pitch, float altitude, float hgt_setpoint, float EAS_set
 		control_setpoint.altitude_reference = _altitude_reference_model.getAltitudeReference();
 		control_setpoint.altitude_rate_setpoint_direct = _altitude_reference_model.getHeightRateSetpointDirect();
 		control_setpoint.tas_setpoint = calcTrueAirspeedSetpoint(eas_to_tas, EAS_setpoint);
+	
 
 		const TECSControl::Input control_input{ .altitude = altitude,
 							.altitude_rate = hgt_rate,
@@ -781,6 +890,13 @@ void TECS::update(float pitch, float altitude, float hgt_setpoint, float EAS_set
 
 void TECS::_setFastDescend(const float alt_setpoint, const float alt)
 {
+
+	if (_control_flag.gliding_mode_enabled) {
+		_fast_descend = 0.0f;
+		_enabled_fast_descend_timestamp = 0U;
+		return;
+	}
+
 	if (_control_flag.airspeed_enabled && (_fast_descend_alt_err > FLT_EPSILON)
 	    && ((alt_setpoint + _fast_descend_alt_err) < alt)) {
 		auto now = hrt_absolute_time();

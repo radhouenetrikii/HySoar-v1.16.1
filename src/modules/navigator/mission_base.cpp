@@ -95,12 +95,25 @@ void MissionBase::updateMavlinkMission()
 		_mission_sub.update(&new_mission);
 
 		const bool mission_items_changed = (new_mission.mission_id != _mission.mission_id);
-		const bool mission_data_changed = checkMissionDataChanged(new_mission);
 
 		if (new_mission.current_seq < 0) {
 			new_mission.current_seq = math::constrain(_mission.current_seq, INT32_C(0),
 						  static_cast<int32_t>(new_mission.count) - 1);
 		}
+
+		// Mission uORB is still published while the mission *mode* is inactive (AUTO_LOITER during
+		// thermalling, etc.). Duplicate/stale publications with a lower current_seq rewind the
+		// stored mission state; on resume AUTO_MISSION flies an already-passed item. Hold at
+		// least the sequence captured in on_inactivation() until on_activation() clears it.
+		// Explicit jumps via set_current_mission_index() clear _mission_paused_seq; a new mission
+		// plan clears it in onMissionUpdate().
+		if (!isActive() && (_mission_paused_seq >= 0) && !mission_items_changed
+		    && (new_mission.mission_dataman_id == _mission.mission_dataman_id)
+		    && (new_mission.current_seq < _mission_paused_seq)) {
+			new_mission.current_seq = _mission_paused_seq;
+		}
+
+		const bool mission_data_changed = checkMissionDataChanged(new_mission);
 
 		if (new_mission.geofence_id != _mission.geofence_id) {
 			// New geofence data, need to check mission again.
@@ -124,6 +137,7 @@ void MissionBase::onMissionUpdate(bool has_mission_items_changed)
 	if (has_mission_items_changed) {
 		_dataman_cache.invalidate();
 		_load_mission_index = -1;
+		_mission_paused_seq = -1;
 
 		if (canRunMissionFeasibility()) {
 			_mission_checked = true;
@@ -196,6 +210,7 @@ MissionBase::on_inactivation()
 	_mission_type = MissionType::MISSION_TYPE_NONE;
 
 	_inactivation_index = _mission.current_seq;
+	_mission_paused_seq = _mission.current_seq;
 }
 
 void
@@ -246,10 +261,22 @@ MissionBase::on_activation()
 	}
 
 	checkClimbRequired(_mission.current_seq);
+
+	// Clear the position setpoint triplet inherited from the previous navigation mode
+	// (e.g. loiter setpoint from thermal circling) before building the mission triplet.
+	// Without this, setActiveMissionItems() snapshots the loiter position into
+	// pos_sp_triplet->previous, which the FW guidance uses as the start of the track
+	// line.  That makes the aircraft approach the next waypoint from the thermal centre
+	// direction and — when the centre is near the previous mission waypoint — visually
+	// appear to "go back" to that waypoint.  Resetting here is consistent with what
+	// Mission::set_current_mission_index() already does when active.
+	_navigator->reset_triplets();
+
 	set_mission_items();
 
 	_mission_activation_index = _mission.current_seq;
 	_inactivation_index = -1; // reset
+	_mission_paused_seq = -1;
 
 	// reset cruise speed
 	_navigator->reset_cruising_speed();
@@ -753,6 +780,7 @@ MissionBase::checkMissionRestart()
 	    && ((_mission.current_seq + 1) == _mission.count)) {
 		setMissionIndex(0);
 		_inactivation_index = -1; // reset
+		_mission_paused_seq = -1;
 		_is_current_planned_mission_item_valid = isMissionValid();
 		resetMissionJumpCounter();
 		_navigator->reset_cruising_speed();
@@ -1226,6 +1254,7 @@ void MissionBase::resetMission()
 	}
 
 	/* Set a new mission*/
+	_mission_paused_seq = -1;
 	_mission.timestamp = hrt_absolute_time();
 	_mission.current_seq = 0;
 	_mission.land_start_index = -1;

@@ -47,5 +47,8 @@ param set SIH_IZZ 0.0177
 param set SIH_IXZ 0.00046
 param set SIH_KDV 0.2
 
+# Allow true engine-off gliding in soaring mode
+param set-default FW_THR_MIN 0.0
+
 param set SIH_VEHICLE_TYPE 1 	# sih as fixed wing
 param set RWTO_TKOFF 1  # enable takeoff from runway (as opposed to launched)

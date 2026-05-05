@@ -40,6 +40,8 @@ set(msg_files
 	AckermannVelocitySetpoint.msg
 	ActionRequest.msg
 	ActuatorArmed.msg
+	AutosoaringControl.msg
+	AutosoaringStatus.msg
 	ActuatorControlsStatus.msg
 	ActuatorOutputs.msg
 	ActuatorServosTrim.msg

@@ -34,6 +34,8 @@
 #include "FixedwingPositionControl.hpp"
 
 #include <px4_platform_common/events.h>
+#include <parameters/param.h>
+#include <commander/px4_custom_mode.h>
 
 using math::constrain;
 using math::max;
@@ -136,6 +138,22 @@ FixedwingPositionControl::parameters_update()
 	_tecs.set_throttle_damp(_param_fw_t_thr_damping.get());
 	_tecs.set_integrator_gain_throttle(_param_fw_t_thr_integ.get());
 	_tecs.set_integrator_gain_pitch(_param_fw_t_I_gain_pit.get());
+	// Glide airspeed setpoint: computed here so TECS stays mode-agnostic.
+	// SOARING_GLIDE_POLAR (mode 2) uses polar best-glide EAS = sqrt(b/a).
+	// All other soaring modes use FW_GLIDE_AIRSPD (overridable per-cycle by airspeed_cmd).
+	// The active soaring_mode is checked via _autosoaring_control; at parameters_update time
+	// we set the polar value eagerly so the first TECS cycle after a mode-2 activation is correct.
+	{
+		const float polar_a = _param_fw_polar_a.get();
+		const float polar_b = _param_fw_polar_b.get();
+		const float v_polar_eas = (polar_a > FLT_EPSILON && polar_b > FLT_EPSILON)
+					  ? sqrtf(polar_b / polar_a) : 0.0f;
+		const bool polar_mode = (_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_GLIDE_POLAR);
+		_tecs.set_gliding_airspeed_setpoint(polar_mode && v_polar_eas > FLT_EPSILON
+						    ? v_polar_eas : _param_fw_glide_airspd.get());
+	}
+	_tecs.set_glide_i_decay(_param_fw_glide_i_decay.get()); // throttle integrator decay (FW_GLIDE_I_DECAY)
+	_tecs.set_glide_stall_eas(_param_fw_airspd_stall.get()); // absolute glide floor = stall speed (FW_AIRSPD_STALL)
 	_tecs.set_throttle_slewrate(_param_fw_thr_slew_max.get());
 	_tecs.set_vertical_accel_limit(_param_fw_t_vert_acc.get());
 	_tecs.set_roll_throttle_compensation(_param_fw_t_rll2thr.get());
@@ -200,6 +218,96 @@ FixedwingPositionControl::vehicle_command_poll()
 				}
 			}
 
+		} else if (vehicle_command.command == vehicle_command_s::VEHICLE_CMD_CUSTOM_0) {
+			// CLI soaring command: param1 encodes the soaring_mode integer directly.
+			//   0 = SOARING_OFF   1 = SOARING_GLIDE_FIXED   2 = SOARING_GLIDE_POLAR
+			//   3 = SOARING_THERMAL_LOITER                  4 = SOARING_THERMAL_BANK
+			// Optional: param2 = bank_angle_cmd [deg], param3 = loiter_radius_m.
+			// CLI always wins over DDS — it represents the ground operator's intent.
+			const uint8_t new_mode = static_cast<uint8_t>(math::constrain(
+						(int)vehicle_command.param1, 0,
+						(int)autosoaring_control_s::SOARING_THERMAL_BANK));
+			_autosoaring_control.soaring_mode     = new_mode;
+			_autosoaring_control.loiter_radius_m  = (vehicle_command.param3 > FLT_EPSILON)
+								? vehicle_command.param3 : NAN;
+			if (PX4_ISFINITE(vehicle_command.param2) && vehicle_command.param2 > FLT_EPSILON) {
+				_autosoaring_control.bank_angle_cmd = vehicle_command.param2;
+			}
+
+			const bool enabling = (new_mode != autosoaring_control_s::SOARING_OFF);
+
+		if (enabling) {
+			// CLI enables soaring: take local authority, clear any cooldown so DDS
+			// is also re-allowed (CLI and DDS cooperate when both want soaring).
+			_soaring_local_override       = true;
+			_soaring_dds_inhibit_until_us = 0;     // no cooldown active
+			_soaring_forbidden_latched    = false; // CLI always clears latch
+			_autosoaring_last_recv_us     = 0;     // disable staleness watchdog
+			// Mark that the paired DO_SET_MODE (auto:mission/loiter) is soaring-related.
+			_soaring_expect_set_mode      = true;
+			// Reset DO_REPOSITION debounce so the first thermal command fires immediately
+			// on the very next control_auto() cycle (not blocked by a recent glide command).
+			_soaring_mode_cmd_last_us     = 0;
+			_soaring_last_lat             = NAN;
+			_soaring_last_lon             = NAN;
+			// Notify companion immediately so it knows CLI took authority and which mode is active.
+			publish_autosoaring_status(autosoaring_status_s::SOURCE_CLI_SOARING_ON,
+						   new_mode,
+						   0,
+						   autosoaring_status_s::SOARING_PHASE_CRUISE);
+
+			} else {
+				// CLI soar:off: stop immediately and block DDS for 5 s.
+				// After 5 s the DDS path is automatically re-allowed so the companion
+				// can take back control without needing a CLI soar:glide first.
+				_soaring_local_override       = false;
+				_soaring_forbidden_latched    = false;
+				_soaring_expect_set_mode      = false;
+				_soaring_dds_inhibit_until_us = hrt_absolute_time() + 5_s;
+				// Reset to 0 (not hrt_absolute_time) so the staleness watchdog,
+				// which triggers on _autosoaring_last_recv_us > 0, is not activated.
+				_autosoaring_last_recv_us     = 0;
+			_tecs.set_gliding_mode_enabled(false);
+			publish_autosoaring_status(autosoaring_status_s::SOURCE_CLI_SOARING_OFF,
+						   _autosoaring_control.soaring_mode,
+						   _soaring_dds_inhibit_until_us,
+						   autosoaring_status_s::SOARING_PHASE_CRUISE);
+			_autosoaring_status_repub_us = hrt_absolute_time();
+			}
+
+		} else if (vehicle_command.command == vehicle_command_s::VEHICLE_CMD_DO_SET_MODE) {
+			// When soaring is CLI-active and a DO_SET_MODE arrives:
+			//  - If paired with a recent CUSTOM_0 (soar:glide sends both back-to-back):
+			//    → it IS the soaring mode switch, leave soaring on.
+			//  - If switching to AUTO_MISSION or AUTO_LOITER redundantly (QGC heartbeat):
+			//    → ignore — these modes are compatible with soaring.
+			//  - If switching to an incompatible mode (MANUAL, STABILIZED, etc.):
+			//    → treat as "exit soaring, restore powered flight".
+			if (_soaring_local_override) {
+				if (_soaring_expect_set_mode) {
+					_soaring_expect_set_mode = false;  // consume the pairing — soaring stays ON
+
+				} else {
+					// Check if the target mode is compatible with soaring (AUTO_MISSION or AUTO_LOITER).
+					// QGC sends periodic DO_SET_MODE(AUTO_MISSION) to maintain mode — ignore those.
+					const uint8_t main_mode = (uint8_t)vehicle_command.param2;
+					const uint8_t sub_mode  = (uint8_t)vehicle_command.param3;
+					const bool target_auto_mission = (main_mode == PX4_CUSTOM_MAIN_MODE_AUTO &&
+									  sub_mode  == PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+					const bool target_auto_loiter  = (main_mode == PX4_CUSTOM_MAIN_MODE_AUTO &&
+									  sub_mode  == PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
+
+					if (!target_auto_mission && !target_auto_loiter) {
+						// Switching to an incompatible mode → exit soaring
+						_autosoaring_control.soaring_mode  = autosoaring_control_s::SOARING_OFF;
+						_soaring_local_override    = false;
+						_soaring_forbidden_latched = false;
+						_tecs.set_gliding_mode_enabled(false);
+						PX4_INFO("Autosoaring: mode switch → soaring disabled, powered flight restored");
+					}
+					// else: AUTO_MISSION/AUTO_LOITER redundant from QGC — keep soaring active
+				}
+			}
 		}
 	}
 }
@@ -505,6 +613,19 @@ FixedwingPositionControl::landing_status_publish()
 	pos_ctrl_landing_status.timestamp = hrt_absolute_time();
 
 	_pos_ctrl_landing_status_pub.publish(pos_ctrl_landing_status);
+}
+
+void
+FixedwingPositionControl::publish_autosoaring_status(uint8_t source, uint8_t soaring_mode_effective,
+		hrt_abstime dds_inhibit_until_us, uint8_t fmu_soaring_phase)
+{
+	autosoaring_status_s status{};
+	status.timestamp = hrt_absolute_time();
+	status.source = source;
+	status.soaring_mode_effective = soaring_mode_effective;
+	status.dds_inhibit_until_us = dds_inhibit_until_us;
+	status.fmu_soaring_phase = fmu_soaring_phase;
+	_autosoaring_status_pub.publish(status);
 }
 
 float FixedwingPositionControl::getCorrectedNpfgRollSetpoint()
@@ -864,6 +985,363 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 	position_setpoint_s current_sp = pos_sp_curr;
 	move_position_setpoint_for_vtol_transition(current_sp);
 
+	// After thermal → AUTO_LOITER → AUTO_MISSION, force the mission index we latched at
+	// thermal entry. Commander applies DO_SET_MODE before the navigator has necessarily
+	// finished reconciling mission state; publishing here only once nav_state is
+	// AUTO_MISSION avoids racing the mode switch and overrides stale seq rewinds.
+	if (_soaring_pending_mission_restore && _soaring_mission_resume_valid
+	    && (_vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION)) {
+		_soaring_pending_mission_restore = false;
+
+		vehicle_command_s restore_cmd{};
+		restore_cmd.timestamp        = hrt_absolute_time();
+		restore_cmd.command          = vehicle_command_s::VEHICLE_CMD_MISSION_START;
+		restore_cmd.param1           = (float)_soaring_mission_resume_seq;
+		restore_cmd.param2           = 0.f;
+		restore_cmd.target_system    = 1;
+		restore_cmd.target_component = 1;
+		_pub_vehicle_command.publish(restore_cmd);
+
+		_soaring_mission_resume_valid = false;
+		PX4_INFO("Autosoaring: MISSION_START seq %u (post-thermal)", (unsigned)_soaring_mission_resume_seq);
+	}
+
+	// -------------------------------------------------------------------------
+	// Autosoaring control block
+	// -------------------------------------------------------------------------
+	// Three entry paths (priority order):
+	//   1. CLI  (`commander mode soar:glide/thermal/off`) via VEHICLE_CMD_CUSTOM_0
+	//      → _soaring_local_override=true, altitude checks bypassed (pilot in command)
+	//   2. ROS2 companion via XRCE-DDS (AutosoaringControl uORB)
+	//      → altitude safety enforced, staleness watchdog active
+	//   3. Any other mode switch (soar:off, mode change in vehicle_command_poll)
+	//      → clears flags, powered flight restored
+	//
+	// BUG FIXES vs previous version:
+	//   - Removed nav_state auto-exit guard: it fired before Commander finished the
+	//     mode switch, killing soaring on the very first cycle.
+	//   - Altitude floor (FW_ALT_MIN) is SKIPPED when _soaring_local_override=true
+	//     so CLI testing works at any altitude.
+	//   - _soaring_forbidden_latched is cleared whenever soaring is disabled (not
+	//     just when soaring_requested=false), preventing permanent lock-out.
+	// -------------------------------------------------------------------------
+
+	const float alt_min  = _param_fw_alt_min.get();
+	const float alt_max  = _param_fw_alt_max.get();
+	const float alt_hyst = _param_fw_alt_hyst.get();
+	const float current_altitude = _local_pos.z_global ? -_local_pos.z + _local_pos.ref_alt : _current_altitude;
+
+	const uint8_t soaring_cmd     = _autosoaring_control.soaring_mode;
+	const bool    soaring_requested = (soaring_cmd != autosoaring_control_s::SOARING_OFF);
+	const bool    glide_cmd   = (soaring_cmd == autosoaring_control_s::SOARING_GLIDE_FIXED ||
+				     soaring_cmd == autosoaring_control_s::SOARING_GLIDE_POLAR);
+	const bool    thermal_cmd = (soaring_cmd == autosoaring_control_s::SOARING_THERMAL_LOITER ||
+				     soaring_cmd == autosoaring_control_s::SOARING_THERMAL_BANK);
+
+	// Altitude floor — enforced on ALL paths (DDS and CLI).
+	// CLI local override is also cleared so the aircraft resumes powered flight automatically;
+	// the operator must re-issue soar:glide/polar once altitude is recovered.
+	if (soaring_requested && current_altitude < alt_min) {
+		if (!_soaring_forbidden_latched) {
+			_soaring_forbidden_latched = true;
+			// If CLI was in control, release the override so mission resumes automatically.
+			if (_soaring_local_override) {
+				_soaring_local_override    = false;
+				_soaring_expect_set_mode   = false;
+				PX4_WARN("Soaring CLI override released: alt %.0f m below FW_ALT_MIN %.0f m — resuming mission",
+					 (double)current_altitude, (double)alt_min);
+			} else {
+				PX4_WARN("Soaring disabled: alt %.0f m below min %.0f m (FW_ALT_MIN)",
+					 (double)current_altitude, (double)alt_min);
+			}
+		}
+	}
+
+	// Clear latch when soaring is turned off (from any path)
+	if (!soaring_requested) {
+		_soaring_forbidden_latched = false;
+	}
+
+	// Altitude ceiling hysteresis (thermal → glide when ceiling reached)
+	if (_alt_max_reached && current_altitude < (alt_max - alt_hyst)) {
+		_alt_max_reached = false;
+	}
+
+	if (current_altitude >= alt_max) {
+		_alt_max_reached = true;
+	}
+
+	// soaring_allowed: DDS path respects latch; CLI local override bypasses it
+	const bool soaring_allowed = soaring_requested && (_soaring_local_override || !_soaring_forbidden_latched);
+
+	// Effective modes: altitude ceiling forces glide even when thermal was requested.
+	// When ceiling forces a thermal→glide transition, fall back to SOARING_GLIDE_FIXED.
+	const bool effective_glide         = soaring_allowed && (glide_cmd || _alt_max_reached);
+	const bool effective_thermal       = soaring_allowed && thermal_cmd && !_alt_max_reached;
+	const bool effective_thermal_bank  = effective_thermal &&
+					     (soaring_cmd == autosoaring_control_s::SOARING_THERMAL_BANK);
+
+	const hrt_abstime now = hrt_absolute_time();
+
+	if (soaring_allowed) {
+		if (effective_thermal) {
+			// Issue DO_REPOSITION to navigator with thermal centre and loiter radius.
+			// We send on first activation (NAN guard) or when DDS provides a new explicit position.
+			// If DDS sends lat/lon=0 (meaning "loiter here"), we pin the centre at the activation
+			// point and NEVER update it again — otherwise the loiter centre would follow the
+			// aircraft every second as curr_pos changes (the moving-loiter-centre bug).
+		const bool dds_has_explicit_pos = (PX4_ISFINITE(_autosoaring_control.loiter_lat) &&
+						   fabsf(_autosoaring_control.loiter_lat) > FLT_EPSILON);
+		const double lat = dds_has_explicit_pos ? (double)_autosoaring_control.loiter_lat : curr_pos(0);
+		const double lon = dds_has_explicit_pos ? (double)_autosoaring_control.loiter_lon : curr_pos(1);
+
+			// pos_changed is true only on:
+			//   a) first activation (_soaring_last_lat is NAN) — always send once, or
+			//   b) DDS explicitly changed the coordinates (non-zero lat/lon moved > 1e-5°)
+			// When DDS lat/lon=0, pos_changed stays false after the first command → centre is pinned.
+			const bool first_activation = !PX4_ISFINITE(_soaring_last_lat);
+			const bool explicit_pos_changed = dds_has_explicit_pos &&
+							  (fabs(lat - _soaring_last_lat) > 1e-5 ||
+							   fabs(lon - _soaring_last_lon) > 1e-5);
+
+			// T3: Before the very first thermal roll, verify we have sufficient airspeed
+			// margin for the commanded bank angle.  Compute the load-factor-corrected
+			// minimum EAS and apply a 5 % stall margin.  If too slow, suppress the
+			// DO_REPOSITION this cycle; _soaring_last_lat stays NAN so we retry next cycle.
+			bool airspeed_ok_for_thermal = true;
+
+			if (first_activation && _airspeed_valid) {
+				const float bank_rad_thermal    = math::radians(_soaring_bank_angle_cmd_deg);
+				const float load_factor_thermal = 1.f / math::max(cosf(bank_rad_thermal), 0.1f);
+				const float eas_banked_floor    = _performance_model.getMinimumCalibratedAirspeed(load_factor_thermal) * 1.05f;
+
+				if (_airspeed_eas < eas_banked_floor) {
+					airspeed_ok_for_thermal = false;
+					PX4_WARN("Autosoaring: thermal entry delayed - EAS %.1f < banked-stall floor"
+						 " %.1f m/s (bank %.0f deg); waiting for speed",
+						 (double)_airspeed_eas, (double)eas_banked_floor,
+						 (double)_soaring_bank_angle_cmd_deg);
+				}
+			}
+
+			// Also re-send when turn direction flips (clockwise ↔ CCW): navigator must
+		// receive a new DO_REPOSITION with the updated radius sign.
+		// direction_changed is suppressed on first_activation (direction is already
+		// encoded in the first command).
+		const bool direction_changed = !first_activation &&
+					       (_autosoaring_control.loiter_clockwise != _soaring_last_clockwise);
+
+		const bool pos_changed = (first_activation && airspeed_ok_for_thermal) ||
+					 explicit_pos_changed || direction_changed;
+
+		if (pos_changed) {
+			if (first_activation) {
+				// Latch mission index now (AUTO_MISSION) so we can restore it after
+				// AUTO_LOITER even if mission uORB is rewound while thermalling.
+				_soaring_pending_mission_restore = false;
+				mission_s mission_snap{};
+
+					if (_mission_sub.copy(&mission_snap) && (mission_snap.count > 0)) {
+						const int32_t cs = math::constrain(mission_snap.current_seq, INT32_C(0),
+										     (int32_t)mission_snap.count - 1);
+						_soaring_mission_resume_seq   = (uint16_t)cs;
+						_soaring_mission_resume_valid = true;
+
+					} else {
+						_soaring_mission_resume_valid = false;
+					}
+				}
+
+				// Enforce minimum loiter radius from bank angle limit to avoid exceeding the
+				// maximum bank angle during thermalling.  Physics: r_min = V²/(g·tan(φ_max)).
+				// Uses companion bank_angle_cmd if provided, else FW_THERMAL_BANK param.
+				const float bank_max_rad = math::radians(_soaring_bank_angle_cmd_deg);
+				const float v_tas        = _param_fw_glide_airspd.get() * _eas2tas;
+				const float r_min_bank   = (v_tas * v_tas) /
+							    (CONSTANTS_ONE_G * math::max(tanf(bank_max_rad), 0.1f));
+
+			float effective_radius;
+			const float companion_radius = _autosoaring_control.loiter_radius_m;
+
+			if (PX4_ISFINITE(companion_radius) && companion_radius > FLT_EPSILON) {
+				// Companion specified a radius: clamp to the bank-angle floor.
+				effective_radius = math::max(companion_radius, r_min_bank);
+
+			} else {
+				// No radius from companion: use bank-angle-derived minimum.
+				// For SOARING_THERMAL_BANK the navigator loiter is just an anchor;
+				// the roll is overridden below, so the exact radius matters little.
+				effective_radius = r_min_bank;
+			}
+
+			// PX4 convention: negative loiter radius = CCW (left) turn.
+			const float signed_radius = _autosoaring_control.loiter_clockwise
+						    ? effective_radius : -effective_radius;
+
+			vehicle_command_s cmd{};
+			cmd.timestamp         = now;
+			cmd.command           = vehicle_command_s::VEHICLE_CMD_DO_REPOSITION;
+			cmd.param1            = -1.f;  // keep current speed
+			cmd.param2            = 1.f;   // REPOSITION_ACTION_NORMAL → switch to AUTO_LOITER
+			cmd.param3            = signed_radius;
+			cmd.param4            = NAN;   // yaw unchanged
+				cmd.param5            = lat;
+				cmd.param6            = lon;
+				cmd.param7            = current_altitude;
+				cmd.target_system     = 1;
+				cmd.target_component  = 1;
+			_pub_vehicle_command.publish(cmd);
+			_soaring_last_lat         = lat;
+			_soaring_last_lon         = lon;
+			_soaring_last_clockwise   = _autosoaring_control.loiter_clockwise;
+			_soaring_mode_cmd_last_us = now;
+			}
+
+		} else if (effective_glide && (now - _soaring_mode_cmd_last_us) > 1_s) {
+			// Return to AUTO_MISSION to continue waypoint track while gliding (engine off).
+			vehicle_command_s cmd{};
+			cmd.timestamp        = now;
+			cmd.command          = vehicle_command_s::VEHICLE_CMD_DO_SET_MODE;
+			cmd.param1           = 1.f;                                     // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+			cmd.param2           = (float)PX4_CUSTOM_MAIN_MODE_AUTO;        // main mode
+			cmd.param3           = (float)PX4_CUSTOM_SUB_MODE_AUTO_MISSION; // sub mode
+			cmd.target_system    = 1;
+			cmd.target_component = 1;
+			_pub_vehicle_command.publish(cmd);
+			_soaring_mode_cmd_last_us = now;
+		}
+	}
+
+	// Pass consolidated gliding flag to TECS (single point of truth).
+	// All soaring modes (1–4) share engine-off / speed-on-elevator behaviour in TECS.
+	_tecs.set_gliding_mode_enabled(effective_glide || effective_thermal);
+
+	// Apply per-cycle dynamic overrides from the companion (NaN = keep PX4 default).
+	if (soaring_allowed) {
+		// Airspeed setpoint — used only by SOARING_GLIDE_FIXED (mode 1).
+		// SOARING_GLIDE_POLAR uses polar-derived EAS (set in parameters_update).
+		// Thermal modes always use FW_GLIDE_AIRSPD as the hold speed.
+		if (soaring_cmd == autosoaring_control_s::SOARING_GLIDE_FIXED &&
+		    PX4_ISFINITE(_autosoaring_control.airspeed_cmd) &&
+		    _autosoaring_control.airspeed_cmd > FLT_EPSILON) {
+			_tecs.set_gliding_airspeed_setpoint(_autosoaring_control.airspeed_cmd);
+
+		} else if (soaring_cmd == autosoaring_control_s::SOARING_GLIDE_POLAR) {
+			// Recompute polar best-glide EAS each cycle (air density may change).
+			const float a = _param_fw_polar_a.get();
+			const float b = _param_fw_polar_b.get();
+			if (a > FLT_EPSILON && b > FLT_EPSILON) {
+				_tecs.set_gliding_airspeed_setpoint(sqrtf(b / a));
+			}
+
+		} else {
+			_tecs.set_gliding_airspeed_setpoint(_param_fw_glide_airspd.get());
+		}
+
+		// Bank angle — used by thermal modes (3 and 4).
+		if (PX4_ISFINITE(_autosoaring_control.bank_angle_cmd) &&
+		    _autosoaring_control.bank_angle_cmd > FLT_EPSILON) {
+			_soaring_bank_angle_cmd_deg = _autosoaring_control.bank_angle_cmd;
+		} else {
+			_soaring_bank_angle_cmd_deg = _param_fw_thermal_bank.get();
+		}
+
+	} else {
+		_tecs.set_gliding_airspeed_setpoint(_param_fw_glide_airspd.get());
+		_soaring_bank_angle_cmd_deg = _param_fw_thermal_bank.get();
+	}
+
+	// Detect thermal→off transition: return to powered AUTO_MISSION automatically.
+	// This handles both DDS staleness watchdog expiry and explicit soar:off/soar:glide switches.
+	// Condition: we were thermalling last cycle, thermal just ended, and we are NOT switching
+	// directly into glide mode (altitude-ceiling event handles that separately).
+	if (_soaring_was_thermal && !effective_thermal && !effective_glide) {
+		// Switch back to AUTO_MISSION so the navigator resumes flying the plan.
+		vehicle_command_s exit_cmd{};
+		exit_cmd.timestamp       = now;
+		exit_cmd.command         = vehicle_command_s::VEHICLE_CMD_DO_SET_MODE;
+		exit_cmd.param1          = 1.f;                                   // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+		exit_cmd.param2          = (float)PX4_CUSTOM_MAIN_MODE_AUTO;      // main mode (read as uint8 by Commander)
+		exit_cmd.param3          = (float)PX4_CUSTOM_SUB_MODE_AUTO_MISSION; // sub mode
+		exit_cmd.target_system   = 1;
+		exit_cmd.target_component = 1;
+		_pub_vehicle_command.publish(exit_cmd);
+		// Clear local override so vehicle_command_poll() does not intercept
+		// the command above as a "standalone mode switch exit soaring" (soaring already off).
+		_soaring_local_override    = false;
+		_soaring_forbidden_latched = false;
+	// Reset the thermal-centre cache so the NEXT thermal entry is treated as a
+	// fresh first_activation (new DO_REPOSITION + new mission-index latch).
+	_soaring_last_lat          = NAN;
+	_soaring_last_lon          = NAN;
+	_soaring_last_clockwise    = true;  // reset to default so next entry re-applies direction
+
+		if (_soaring_mission_resume_valid) {
+			_soaring_pending_mission_restore = true;
+		}
+
+		PX4_INFO("Autosoaring: thermal ended → AUTO_MISSION");
+	}
+
+	// Glide → off transition: send DO_SET_MODE → AUTO_MISSION so the navigator
+	// resumes the mission plan after an altitude-floor event (or explicit soar:off).
+	// Only fires once per transition (_soaring_was_glide guards it), same pattern as
+	// the thermal→off block above.
+	const bool soaring_was_glide_only = _soaring_was_glide && !_soaring_was_thermal;
+
+	if (soaring_was_glide_only && !effective_glide && !effective_thermal) {
+		vehicle_command_s glide_exit_cmd{};
+		glide_exit_cmd.timestamp        = now;
+		glide_exit_cmd.command          = vehicle_command_s::VEHICLE_CMD_DO_SET_MODE;
+		glide_exit_cmd.param1           = 1.f;
+		glide_exit_cmd.param2           = (float)PX4_CUSTOM_MAIN_MODE_AUTO;
+		glide_exit_cmd.param3           = (float)PX4_CUSTOM_SUB_MODE_AUTO_MISSION;
+		glide_exit_cmd.target_system    = 1;
+		glide_exit_cmd.target_component = 1;
+		_pub_vehicle_command.publish(glide_exit_cmd);
+
+		// Clear local override so vehicle_command_poll() does not intercept the
+		// DO_SET_MODE above as a "standalone mode switch → exit soaring" when soaring
+		// is already exiting.  Mirrors the same guard in the thermal→off block.
+		_soaring_local_override    = false;
+		_soaring_forbidden_latched = false;
+
+		PX4_INFO("Autosoaring: glide ended → AUTO_MISSION");
+	}
+
+	_soaring_was_glide        = effective_glide;
+	_soaring_was_thermal      = effective_thermal;
+	_soaring_was_bank_thermal = effective_thermal_bank;
+
+	// 2 Hz phase heartbeat: keep the companion informed of the FMU's current soaring phase
+	// while soaring is active. Also published when soaring is off so the companion can confirm.
+	{
+		const hrt_abstime phase_now = hrt_absolute_time();
+
+		if (phase_now - _autosoaring_status_periodic_us >= 500_ms) {
+			_autosoaring_status_periodic_us = phase_now;
+
+			uint8_t fmu_phase;
+
+			if (effective_thermal) {
+				fmu_phase = PX4_ISFINITE(_soaring_last_lat)
+					    ? autosoaring_status_s::SOARING_PHASE_THERMAL
+					    : autosoaring_status_s::SOARING_PHASE_SEARCHING;
+
+			} else if (effective_glide) {
+				fmu_phase = autosoaring_status_s::SOARING_PHASE_GLIDING;
+
+			} else {
+				fmu_phase = autosoaring_status_s::SOARING_PHASE_CRUISE;
+			}
+
+			publish_autosoaring_status(autosoaring_status_s::SOURCE_PERIODIC,
+						   _autosoaring_control.soaring_mode,
+						   _soaring_dds_inhibit_until_us,
+						   fmu_phase);
+		}
+	}
+
 	const uint8_t position_sp_type = handle_setpoint_type(current_sp, pos_sp_next);
 
 	_position_sp_type = position_sp_type;
@@ -882,45 +1360,79 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 		}
 	}
 
-	switch (position_sp_type) {
-	case position_setpoint_s::SETPOINT_TYPE_IDLE: {
-			_att_sp.thrust_body[0] = 0.0f;
-			const float roll_body = 0.0f;
-			const float pitch_body = radians(_param_fw_psp_off.get());
-			const float yaw_body = 0.0f;
+	if (effective_thermal_bank) {
+		// SOARING_THERMAL_BANK (mode 4): bypass NPFG and loiter geometry entirely.
+		//
+		// Problem with the old "override after switch" approach: control_auto_loiter()
+		// calls NPFG which computes an airspeed reference that is passed to TECS.
+		// TECS pitch is then computed from that contaminated reference, so the aircraft
+		// still partially tracks the loiter circle even after the roll is overridden.
+		//
+		// Fix: skip the switch completely.  Run TECS directly with the glide airspeed
+		// setpoint; the navigator's loiter geometry has zero influence on pitch, thrust,
+		// or roll.  The loiter anchor (DO_REPOSITION) is only used to keep the navigator
+		// in AUTO_LOITER so it doesn't interfere with the mission sequence.
+		tecs_update_pitch_throttle(control_interval,
+					   current_altitude,             // hold current altitude; TECS freezes ref in glide
+					   _param_fw_glide_airspd.get(), // glide hold speed; NPFG airspeed ref NOT used
+					   radians(_param_fw_p_lim_min.get()),
+					   radians(_param_fw_p_lim_max.get()),
+					   _param_fw_thr_min.get(),      // TECS returns throttle_min (=0) in glide
+					   _param_fw_thr_max.get(),
+					   _param_sinkrate_target.get(),
+					   _param_climbrate_target.get(),
+					   false);
 
-			const Quatf setpoint(Eulerf(roll_body, pitch_body, yaw_body));
-			setpoint.copyTo(_att_sp.q_d);
+		// Direct roll from companion bank angle; pitch from TECS; yaw uncontrolled
+		// (coordinated turn maintained by the rudder/yaw-rate controller).
+		// Sign encodes turn direction: positive = right/clockwise, negative = left/CCW.
+		const float bank_sign = _autosoaring_control.loiter_clockwise ? 1.f : -1.f;
+		const float bank_rad  = bank_sign * math::radians(fabsf(_soaring_bank_angle_cmd_deg));
+		const Quatf q_bank(Eulerf(bank_rad, get_tecs_pitch(), _yaw));
+		q_bank.copyTo(_att_sp.q_d);
+		_att_sp.thrust_body[0] = get_tecs_thrust(); // throttle ramp below may override this
+
+	} else {
+		switch (position_sp_type) {
+		case position_setpoint_s::SETPOINT_TYPE_IDLE: {
+				_att_sp.thrust_body[0] = 0.0f;
+				const float roll_body = 0.0f;
+				const float pitch_body = radians(_param_fw_psp_off.get());
+				const float yaw_body = 0.0f;
+
+				const Quatf setpoint(Eulerf(roll_body, pitch_body, yaw_body));
+				setpoint.copyTo(_att_sp.q_d);
+				break;
+			}
+
+		case position_setpoint_s::SETPOINT_TYPE_POSITION:
+			control_auto_position(control_interval, curr_pos, ground_speed, pos_sp_prev, current_sp);
+			break;
+
+		case position_setpoint_s::SETPOINT_TYPE_VELOCITY:
+			control_auto_velocity(control_interval, curr_pos, ground_speed, current_sp);
+			break;
+
+		case position_setpoint_s::SETPOINT_TYPE_LOITER:
+#ifdef CONFIG_FIGURE_OF_EIGHT
+			if (current_sp.loiter_pattern == position_setpoint_s::LOITER_TYPE_FIGUREEIGHT) {
+				controlAutoFigureEight(control_interval, curr_pos, ground_speed, pos_sp_prev, current_sp);
+
+			} else
+#endif // CONFIG_FIGURE_OF_EIGHT
+			{
+				control_auto_loiter(control_interval, curr_pos, ground_speed, pos_sp_prev, current_sp, pos_sp_next);
+			}
+
 			break;
 		}
-
-	case position_setpoint_s::SETPOINT_TYPE_POSITION:
-		control_auto_position(control_interval, curr_pos, ground_speed, pos_sp_prev, current_sp);
-		break;
-
-	case position_setpoint_s::SETPOINT_TYPE_VELOCITY:
-		control_auto_velocity(control_interval, curr_pos, ground_speed, current_sp);
-		break;
-
-	case position_setpoint_s::SETPOINT_TYPE_LOITER:
-#ifdef CONFIG_FIGURE_OF_EIGHT
-		if (current_sp.loiter_pattern == position_setpoint_s::LOITER_TYPE_FIGUREEIGHT) {
-			controlAutoFigureEight(control_interval, curr_pos, ground_speed, pos_sp_prev, current_sp);
-
-		} else
-#endif // CONFIG_FIGURE_OF_EIGHT
-		{
-			control_auto_loiter(control_interval, curr_pos, ground_speed, pos_sp_prev, current_sp, pos_sp_next);
-
-		}
-
-		break;
 	}
 
 #ifdef CONFIG_FIGURE_OF_EIGHT
 
 	/* reset loiter state */
-	if ((position_sp_type != position_setpoint_s::SETPOINT_TYPE_LOITER) ||
+	if (effective_thermal_bank ||
+	    (position_sp_type != position_setpoint_s::SETPOINT_TYPE_LOITER) ||
 	    ((position_sp_type == position_setpoint_s::SETPOINT_TYPE_LOITER) &&
 	     (current_sp.loiter_pattern != position_setpoint_s::LOITER_TYPE_FIGUREEIGHT))) {
 		_figure_eight.resetPattern();
@@ -929,13 +1441,88 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 #endif // CONFIG_FIGURE_OF_EIGHT
 
 	/* Copy thrust output for publication, handle special cases */
+
+	// ------------------------------------------------------------------
+	// Symmetric glide entry/exit throttle ramps  (FW_GLIDE_RAMP_T)
+	//
+	// Entry ramp (powered → glide):
+	//   Ramp throttle from the last powered value DOWN to 0 over FW_GLIDE_RAMP_T seconds.
+	//   Prevents the abrupt propwash collapse that causes a nose-down pitch transient
+	//   before the speed-on-elevator controller can react.
+	//
+	// Exit ramp (glide → powered):
+	//   Ramp throttle from 0 UP to TECS demand over FW_GLIDE_RAMP_T seconds.
+	//   Prevents the propwash surge that causes a nose-up pitch transient on restart.
+	// ------------------------------------------------------------------
+	const bool currently_soaring = _tecs.get_gliding_mode_enabled();
+	const float ramp_t = _param_fw_glide_ramp_t.get();
+
+	// ---- Cache pre-glide thrust (must run before _soaring_was_active is updated) ----
+	// This stores the last powered TECS thrust so the entry ramp knows where to start from.
+	// The 1-cycle lag (we save cycle N-1 and use it at cycle N) is negligible for a 2 s ramp.
+	if (!currently_soaring && !_landed) {
+		_soaring_pre_glide_thrust = get_tecs_thrust();
+		_soaring_entry_ramp_start_us = 0;  // clear any stale entry timer
+
+	} else if (!_soaring_was_active && currently_soaring && _soaring_entry_ramp_start_us == 0) {
+		// Glide just activated this cycle: start the entry ramp.
+		_soaring_entry_ramp_start_us = hrt_absolute_time();
+	}
+
+	// ---- Exit ramp: soaring → powered ----
+	if (currently_soaring) {
+		_soaring_ramp_start_us = 0;  // keep exit timer clear while gliding
+
+	} else if (_soaring_was_active && _soaring_ramp_start_us == 0) {
+		_soaring_ramp_start_us = hrt_absolute_time();  // glide just ended — start exit ramp
+	}
+
+	// Exit ramp scale: 0 → 1 over ramp_t seconds (1.0 = full TECS thrust)
+	float exit_ramp_scale = 1.0f;
+
+	if (_soaring_ramp_start_us > 0 && ramp_t > FLT_EPSILON) {
+		const float t_elapsed = (float)(hrt_absolute_time() - _soaring_ramp_start_us) * 1e-6f;
+
+		if (t_elapsed < ramp_t) {
+			exit_ramp_scale = t_elapsed / ramp_t;
+
+		} else {
+			_soaring_ramp_start_us = 0;  // exit ramp complete
+		}
+	}
+
+	// Entry ramp: compute ramped throttle (pre_glide_thrust → 0 over ramp_t)
+	// When the ramp is not active (timer=0), entry_throttle stays 0 (steady glide).
+	float entry_throttle = 0.0f;
+
+	if (_soaring_entry_ramp_start_us > 0 && ramp_t > FLT_EPSILON) {
+		const float t_elapsed = (float)(hrt_absolute_time() - _soaring_entry_ramp_start_us) * 1e-6f;
+
+		if (t_elapsed < ramp_t) {
+			entry_throttle = _soaring_pre_glide_thrust * (1.0f - t_elapsed / ramp_t);
+
+		} else {
+			_soaring_entry_ramp_start_us = 0;  // entry ramp complete → engine fully off
+		}
+	}
+
+	_soaring_was_active = currently_soaring;
+
 	if (position_sp_type == position_setpoint_s::SETPOINT_TYPE_IDLE) {
 
 		_att_sp.thrust_body[0] = 0.0f;
 
+	} else if (currently_soaring) {
+		// During glide the engine is off.  While the entry ramp is active, throttle
+		// is deliberately non-zero (ramping down) — this is intentional and safe because
+		// the ramp value came from powered-flight TECS output.  Once the ramp completes,
+		// entry_throttle = 0, which is the steady-state engine-off condition.
+		_att_sp.thrust_body[0] = entry_throttle;
+
 	} else {
-		// when we are landed state we want the motor to spin at idle speed
-		_att_sp.thrust_body[0] = (_landed) ? min(_param_fw_thr_idle.get(), 1.f) : get_tecs_thrust();
+		// Powered flight: apply TECS thrust, scaled by the exit ramp if glide just ended.
+		const float tecs_thr = (_landed) ? min(_param_fw_thr_idle.get(), 1.f) : get_tecs_thrust();
+		_att_sp.thrust_body[0] = tecs_thr * exit_ramp_scale;
 	}
 
 	if (!_vehicle_status.in_transition_to_fw) {
@@ -1074,16 +1661,11 @@ FixedwingPositionControl::control_auto_position(const float control_interval, co
 	float tecs_fw_thr_min;
 	float tecs_fw_thr_max;
 
-	if (pos_sp_curr.gliding_enabled) {
-		/* enable gliding with this waypoint */
-		_tecs.set_speed_weight(2.0f);
-		tecs_fw_thr_min = 0.0;
-		tecs_fw_thr_max = 0.0;
-
-	} else {
-		tecs_fw_thr_min = _param_fw_thr_min.get();
-		tecs_fw_thr_max = _param_fw_thr_max.get();
-	}
+	// Soaring glide/thermal mode is now handled internally by TECS (gliding_mode_enabled flag).
+	// Standard throttle limits are used here; TECS _calcThrottleControlOutput returns throttle_min
+	// when gliding, and _updateSpeedAltitudeWeights switches to speed-on-elevator (w_ske=2).
+	tecs_fw_thr_min = _param_fw_thr_min.get();
+	tecs_fw_thr_max = _param_fw_thr_max.get();
 
 	// waypoint is a plain navigation waypoint
 	float position_sp_alt = pos_sp_curr.alt;
@@ -1167,16 +1749,11 @@ FixedwingPositionControl::control_auto_velocity(const float control_interval, co
 	float tecs_fw_thr_min;
 	float tecs_fw_thr_max;
 
-	if (pos_sp_curr.gliding_enabled) {
-		/* enable gliding with this waypoint */
-		_tecs.set_speed_weight(2.0f);
-		tecs_fw_thr_min = 0.0;
-		tecs_fw_thr_max = 0.0;
-
-	} else {
-		tecs_fw_thr_min = _param_fw_thr_min.get();
-		tecs_fw_thr_max = _param_fw_thr_max.get();
-	}
+	// Soaring glide/thermal mode is now handled internally by TECS (gliding_mode_enabled flag).
+	// Standard throttle limits are used here; TECS _calcThrottleControlOutput returns throttle_min
+	// when gliding, and _updateSpeedAltitudeWeights switches to speed-on-elevator (w_ske=2).
+	tecs_fw_thr_min = _param_fw_thr_min.get();
+	tecs_fw_thr_max = _param_fw_thr_max.get();
 
 	// waypoint is a plain navigation waypoint
 	float position_sp_alt = pos_sp_curr.alt;
@@ -1251,16 +1828,11 @@ FixedwingPositionControl::control_auto_loiter(const float control_interval, cons
 	float tecs_fw_thr_min;
 	float tecs_fw_thr_max;
 
-	if (pos_sp_curr.gliding_enabled) {
-		/* enable gliding with this waypoint */
-		_tecs.set_speed_weight(2.0f);
-		tecs_fw_thr_min = 0.0;
-		tecs_fw_thr_max = 0.0;
-
-	} else {
-		tecs_fw_thr_min = _param_fw_thr_min.get();
-		tecs_fw_thr_max = _param_fw_thr_max.get();
-	}
+	// Soaring glide/thermal mode is now handled internally by TECS (gliding_mode_enabled flag).
+	// Standard throttle limits are used here; TECS _calcThrottleControlOutput returns throttle_min
+	// when gliding, and _updateSpeedAltitudeWeights switches to speed-on-elevator (w_ske=2).
+	tecs_fw_thr_min = _param_fw_thr_min.get();
+	tecs_fw_thr_max = _param_fw_thr_max.get();
 
 	/* waypoint is a loiter waypoint */
 	float loiter_radius = pos_sp_curr.loiter_radius;
@@ -1378,16 +1950,11 @@ FixedwingPositionControl::controlAutoFigureEight(const float control_interval, c
 	float tecs_fw_thr_min;
 	float tecs_fw_thr_max;
 
-	if (pos_sp_curr.gliding_enabled) {
-		/* enable gliding with this waypoint */
-		_tecs.set_speed_weight(2.0f);
-		tecs_fw_thr_min = 0.0;
-		tecs_fw_thr_max = 0.0;
-
-	} else {
-		tecs_fw_thr_min = _param_fw_thr_min.get();
-		tecs_fw_thr_max = _param_fw_thr_max.get();
-	}
+	// Soaring glide/thermal mode is now handled internally by TECS (gliding_mode_enabled flag).
+	// Standard throttle limits are used here; TECS _calcThrottleControlOutput returns throttle_min
+	// when gliding, and _updateSpeedAltitudeWeights switches to speed-on-elevator (w_ske=2).
+	tecs_fw_thr_min = _param_fw_thr_min.get();
+	tecs_fw_thr_max = _param_fw_thr_max.get();
 
 	const bool is_low_height = checkLowHeightConditions();
 
@@ -1433,16 +2000,11 @@ FixedwingPositionControl::control_auto_path(const float control_interval, const 
 	float tecs_fw_thr_min;
 	float tecs_fw_thr_max;
 
-	if (pos_sp_curr.gliding_enabled) {
-		/* enable gliding with this waypoint */
-		_tecs.set_speed_weight(2.0f);
-		tecs_fw_thr_min = 0.0;
-		tecs_fw_thr_max = 0.0;
-
-	} else {
-		tecs_fw_thr_min = _param_fw_thr_min.get();
-		tecs_fw_thr_max = _param_fw_thr_max.get();
-	}
+	// Soaring glide/thermal mode is now handled internally by TECS (gliding_mode_enabled flag).
+	// Standard throttle limits are used here; TECS _calcThrottleControlOutput returns throttle_min
+	// when gliding, and _updateSpeedAltitudeWeights switches to speed-on-elevator (w_ske=2).
+	tecs_fw_thr_min = _param_fw_thr_min.get();
+	tecs_fw_thr_max = _param_fw_thr_max.get();
 
 	// waypoint is a plain navigation waypoint
 	float target_airspeed = adapt_airspeed_setpoint(control_interval, pos_sp_curr.cruising_speed,
@@ -2478,6 +3040,79 @@ FixedwingPositionControl::Run()
 
 			// update parameters from storage
 			parameters_update();
+		}
+
+		// AutosoaringControl: poll ROS2 companion commands (published via XRCE-DDS)
+		autosoaring_control_s soaring_msg;
+
+		if (_autosoaring_control_sub.update(&soaring_msg)) {
+			const hrt_abstime now = hrt_absolute_time();
+			const bool dds_inhibited = (_soaring_dds_inhibit_until_us > 0 && now < _soaring_dds_inhibit_until_us);
+			const bool dds_wants_soaring = (soaring_msg.soaring_mode != autosoaring_control_s::SOARING_OFF);
+
+			if (dds_inhibited && dds_wants_soaring) {
+				// soar:off cooldown active: ignore DDS re-enable attempts.
+				// After 5 s the cooldown expires and DDS takes back control automatically.
+
+			} else {
+				if (!dds_wants_soaring) {
+					// DDS explicitly disabled soaring → cancel any remaining cooldown.
+					_soaring_dds_inhibit_until_us = 0;
+				}
+
+				// DDS is only authoritative when CLI is not holding local override.
+				if (!_soaring_local_override) {
+					const bool prev_thermal = (
+						_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_THERMAL_LOITER ||
+						_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_THERMAL_BANK);
+					const bool new_thermal = (
+						soaring_msg.soaring_mode == autosoaring_control_s::SOARING_THERMAL_LOITER ||
+						soaring_msg.soaring_mode == autosoaring_control_s::SOARING_THERMAL_BANK);
+					_autosoaring_control      = soaring_msg;
+					_autosoaring_last_recv_us = now;
+
+					// If thermal just became active reset the DO_REPOSITION debounce.
+					if (!prev_thermal && new_thermal) {
+						_soaring_mode_cmd_last_us = 0;
+						_soaring_last_lat         = NAN;
+						_soaring_last_lon         = NAN;
+					}
+				}
+			}
+		}
+
+		// Staleness watchdog: companion silent >2 s → disable soaring (DDS path only).
+		if (!_soaring_local_override &&
+		    _autosoaring_last_recv_us > 0 &&
+		    (hrt_absolute_time() - _autosoaring_last_recv_us) > 2_s) {
+			if (_autosoaring_control.soaring_mode != autosoaring_control_s::SOARING_OFF) {
+				PX4_WARN("Autosoaring: companion silent >2 s - disabling soaring");
+				_autosoaring_control.soaring_mode = autosoaring_control_s::SOARING_OFF;
+			publish_autosoaring_status(autosoaring_status_s::SOURCE_STALENESS_WATCHDOG,
+						   autosoaring_control_s::SOARING_OFF, 0,
+						   autosoaring_status_s::SOARING_PHASE_CRUISE);
+			}
+
+			_tecs.set_gliding_mode_enabled(false);
+			_autosoaring_last_recv_us = 0;
+		}
+
+		// While soar:off DDS inhibit is active, republish status at 1 Hz for robustness if the companion misses a sample.
+		{
+			const hrt_abstime status_now = hrt_absolute_time();
+
+			if (_soaring_dds_inhibit_until_us > 0 && status_now < _soaring_dds_inhibit_until_us) {
+				if (status_now - _autosoaring_status_repub_us >= 1_s) {
+					_autosoaring_status_repub_us = status_now;
+				publish_autosoaring_status(autosoaring_status_s::SOURCE_CLI_SOARING_OFF,
+							   _autosoaring_control.soaring_mode,
+							   _soaring_dds_inhibit_until_us,
+							   autosoaring_status_s::SOARING_PHASE_CRUISE);
+				}
+
+			} else {
+				_autosoaring_status_repub_us = 0;
+			}
 		}
 
 		vehicle_global_position_s gpos;

@@ -1,0 +1,67 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\providecommand \oddpage@label [2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Overview}{2}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Module 1: TECS (Total Energy Control System)}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}M1 --- Altitude Reference Freeze (\texttt  {TECS::update})}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {1}{\ignorespaces TECS altitude reference model selection}}{2}{algocf.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}M2 --- Gravity-Limited Acceleration Cap (\texttt  {\_calcAirspeedControlOutput})}{3}{subsection.2.2}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {2}{\ignorespaces Airspeed rate setpoint cap — glide uses gravity bound}}{3}{algocf.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}M3 --- Underspeed Detection Bypass (\texttt  {\_detectUnderspeed})}{3}{subsection.2.3}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {3}{\ignorespaces Underspeed detection — bypassed in glide}}{3}{algocf.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}M4 --- Energy Weighting Override (\texttt  {\_updateSpeedAltitudeWeights})}{3}{subsection.2.4}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {4}{\ignorespaces Speed/altitude weighting — full speed-on-elevator in glide}}{3}{algocf.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}M5 --- Throttle Hard-Zero (\texttt  {\_calcThrottleControlOutput})}{4}{subsection.2.5}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {5}{\ignorespaces Throttle output — hard zero in glide}}{4}{algocf.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6}M6 --- Throttle Integrator Exponential Decay (\texttt  {\_calcThrottleControlUpdate})}{4}{subsection.2.6}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {6}{\ignorespaces Throttle integrator — exponential decay in glide}}{4}{algocf.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7}M7 --- Load-Factor STE Correction Disabled (\texttt  {\_calcThrottleControlSteRate})}{4}{subsection.2.7}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {7}{\ignorespaces STE rate setpoint — load factor skipped in glide}}{4}{algocf.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8}M8 --- Pitch Integrator Partial Reset (\texttt  {\_calcPitchControl})}{5}{subsection.2.8}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {8}{\ignorespaces Pitch control — symmetric integrator reset at glide transitions}}{5}{algocf.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.9}M9 --- Glide Airspeed Setpoint (\texttt  {calcTrueAirspeedSetpoint})}{5}{subsection.2.9}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {9}{\ignorespaces Airspeed setpoint — glide path bypasses powered-flight minimum}}{5}{algocf.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.10}M10 --- Fast-Descend Suppression (\texttt  {\_setFastDescend})}{5}{subsection.2.10}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {10}{\ignorespaces Fast descend — suppressed entirely in glide}}{5}{algocf.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Module 2: FixedwingPositionControl}{6}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}C1 --- DDS Poll and Authority Arbitration (\texttt  {Run()})}{6}{subsection.3.1}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {11}{\ignorespaces DDS poll: inhibit, CLI override, staleness watchdog}}{6}{algocf.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}C2 --- CLI Soaring Commands (\texttt  {vehicle\_command\_poll()})}{7}{subsection.3.2}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {12}{\ignorespaces vehicle\_command\_poll — CUSTOM\_0 and DO\_SET\_MODE}}{7}{algocf.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}C3 --- Eager Glide Airspeed Push (\texttt  {parameters\_update()})}{8}{subsection.3.3}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {13}{\ignorespaces parameters\_update — push glide airspeed to TECS eagerly}}{8}{algocf.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}C4 --- Soaring Dispatch Block (\texttt  {control\_auto()})}{9}{subsection.3.4}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {14}{\ignorespaces control\_auto — full soaring dispatch (9 steps)}}{9}{algocf.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}C6 --- Symmetric Throttle Ramps}{10}{subsection.3.5}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {15}{\ignorespaces Throttle ramp on glide entry and exit}}{10}{algocf.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Module 3: Commander}{11}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Commander --- CLI Soaring Sub-commands}{11}{subsection.4.1}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {16}{\ignorespaces Commander main() — soaring CLI sub-commands}}{11}{algocf.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Commander --- DO\_REPOSITION Fix}{11}{subsection.4.2}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {17}{\ignorespaces Commander — DO\_REPOSITION param2=0 now accepted}}{11}{algocf.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Module 4: Navigator}{12}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}MissionBase --- Mission Rewind Prevention}{12}{subsection.5.1}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {18}{\ignorespaces MissionBase::updateMavlinkMission — stale uORB guard}}{12}{algocf.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}MissionBase --- Pause / Resume Sequence Tracking}{12}{subsection.5.2}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {19}{\ignorespaces MissionBase on\_inactivation and on\_activation}}{12}{algocf.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}New uORB Messages}{13}{section.6}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {20}{\ignorespaces AutosoaringControl.msg — ROS2 $\to $ FMU command}}{13}{algocf.20}\protected@file@percent }
+\@writefile{loa}{\contentsline {algocf}{\numberline {21}{\ignorespaces AutosoaringStatus.msg — FMU $\to $ ROS2 feedback}}{13}{algocf.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}New Parameters}{13}{section.7}\protected@file@percent }
+\gdef \@abspage@last{13}

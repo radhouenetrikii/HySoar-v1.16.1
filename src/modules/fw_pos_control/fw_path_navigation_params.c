@@ -952,3 +952,154 @@ PARAM_DEFINE_FLOAT(FW_FLAPS_LND_SCL, 1.0f);
  * @group FW Attitude Control
  */
 PARAM_DEFINE_FLOAT(FW_SPOILERS_LND, 0.f);
+
+// ============================================================================
+// SOARING MODE PARAMETERS
+// ============================================================================
+
+/**
+ * Minimum altitude for soaring mode
+ *
+ * Below this altitude soaring is disabled and normal powered mission is forced.
+ * A latch prevents re-enabling until the companion computer publishes both flags false.
+ *
+ * @unit m
+ * @min 50.0
+ * @max 1000.0
+ * @decimal 0
+ * @increment 10
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_ALT_MIN, 100.0f);
+
+/**
+ * Maximum altitude for soaring mode
+ *
+ * When this altitude is reached during thermal mode the aircraft switches to glide mode.
+ * Returning below FW_ALT_MAX - FW_ALT_HYST re-enables thermal mode.
+ *
+ * @unit m
+ * @min 100.0
+ * @max 2000.0
+ * @decimal 0
+ * @increment 10
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_ALT_MAX, 500.0f);
+
+/**
+ * Soaring altitude hysteresis
+ *
+ * Hysteresis band below FW_ALT_MAX used to re-enable thermal mode after
+ * the altitude ceiling is reached.
+ *
+ * @unit m
+ * @min 10.0
+ * @max 100.0
+ * @decimal 1
+ * @increment 5.0
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_ALT_HYST, 20.0f);
+
+/**
+ * Gliding airspeed setpoint
+ *
+ * Fixed equivalent airspeed (EAS) target used by TECS during SOARING_GLIDE_FIXED (mode 1)
+ * and as the hold speed during thermal modes (modes 3 and 4).
+ * For polar best-glide (SOARING_GLIDE_POLAR, mode 2) this parameter is ignored and
+ * EAS is computed from sqrt(FW_POLAR_B / FW_POLAR_A) instead.
+ * TECS internally converts EAS to TAS using the current air-density ratio.
+ *
+ * @unit m/s
+ * @min 5.0
+ * @max 50.0
+ * @decimal 1
+ * @increment 0.5
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_GLIDE_AIRSPD, 10.0f);
+
+/**
+ * Glide polar parabolic coefficient a  (sink = a*V^2 + b)
+ *
+ * Fit from flight-test data at ≥3 airspeeds (e.g. 12, 15, 20 m/s):
+ * log sink rate vs airspeed and fit a parabola.
+ * Used to enforce a physics-based sink-rate limit in the altitude control output.
+ *
+ * @unit norm
+ * @min 0.0001
+ * @max 0.05
+ * @decimal 5
+ * @increment 0.0001
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_POLAR_A, 0.003f);
+
+/**
+ * Glide polar constant term b  (sink = a*V^2 + b)
+ *
+ * Minimum sink rate at best-glide airspeed.
+ * Fit from level glide flight-test data.
+ *
+ * @unit m/s
+ * @min 0.1
+ * @max 5.0
+ * @decimal 2
+ * @increment 0.05
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_POLAR_B, 0.50f);
+
+/**
+ * Throttle ramp time on glide exit
+ *
+ * Time [s] over which throttle ramps from 0 to the TECS demand after
+ * leaving gliding mode. Prevents sudden propwash disturbance and
+ * the associated pitch transient on engine restart.
+ *
+ * @unit s
+ * @min 0.5
+ * @max 10.0
+ * @decimal 1
+ * @increment 0.5
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_GLIDE_RAMP_T, 2.0f);
+
+/**
+ * Maximum bank angle during thermalling loiter
+ *
+ * Steeper bank = tighter loiter circle = better thermal centering.
+ * Constrained by airspeed and stall margin. The minimum safe radius
+ * is enforced in fw_pos_control (r_min = V^2 / (g * tan(bank_max))).
+ *
+ * @unit deg
+ * @min 20.0
+ * @max 60.0
+ * @decimal 1
+ * @increment 1.0
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_THERMAL_BANK, 40.0f);
+
+/**
+ * Throttle integrator decay time constant during gliding
+ *
+ * During engine-off gliding the TECS throttle integrator is not updated
+ * but instead decays exponentially with this time constant so it returns
+ * to zero before engine restart.  Prevents a throttle surge on glide exit.
+ *
+ * Derivation: I(t) = I(0)*exp(-t/tau).  After one tau the integrator is
+ * at 37% of its entry value; after 3*tau it is at 5%.  Choose tau so that
+ * a typical glide segment (30-120 s) leaves the integrator near zero.
+ * Default 10 s gives ~5% residual after 30 s and ~0% after 60 s.
+ *
+ * @unit s
+ * @min 1.0
+ * @max 60.0
+ * @decimal 1
+ * @increment 0.5
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_GLIDE_I_DECAY, 10.0f);

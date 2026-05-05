@@ -417,6 +417,37 @@ int Commander::custom_command(int argc, char *argv[])
 				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
 						     PX4_CUSTOM_SUB_MODE_EXTERNAL1);
 
+			} else if (!strcmp(argv[1], "soar:glide")) {
+				// SOARING_GLIDE_FIXED (mode 1): engine-off, fixed EAS = FW_GLIDE_AIRSPD, follow mission.
+				// param1 = soaring_mode integer.
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 1.0f, 0.0f);
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
+						     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+
+			} else if (!strcmp(argv[1], "soar:polar")) {
+				// SOARING_GLIDE_POLAR (mode 2): engine-off, polar best-glide EAS = sqrt(B/A), follow mission.
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 2.0f, 0.0f);
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
+						     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+
+			} else if (!strcmp(argv[1], "soar:thermal")) {
+				// SOARING_THERMAL_LOITER (mode 3): engine-off, radius-guided loiter via navigator.
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 3.0f, 0.0f);
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
+						     PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
+
+			} else if (!strcmp(argv[1], "soar:bank")) {
+				// SOARING_THERMAL_BANK (mode 4): engine-off, direct bank-angle loiter (companion controls centering).
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 4.0f, 0.0f);
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
+						     PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
+
+			} else if (!strcmp(argv[1], "soar:off")) {
+				// SOARING_OFF (mode 0): disable soaring and restore powered flight.
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 0.0f, 0.0f);
+				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
+						     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
+
 			} else {
 				PX4_ERR("argument %s unsupported.", argv[1]);
 			}
@@ -751,7 +782,15 @@ Commander::handle_command(const vehicle_command_s &cmd)
 			const bool mode_switch_not_requested = (change_mode_flags & 1) == 0;
 			const bool unsupported_bits_set = (change_mode_flags & ~1) != 0;
 
-			if (mode_switch_not_requested || unsupported_bits_set) {
+			// Soaring: param2==1 requests a mode switch to LOITER; param2==0 means
+			// position-only update without a mode change (navigator will process it regardless).
+			// The original stock logic rejected param2==0 with UNSUPPORTED; we now pass it
+			// through so companion-initiated thermal loiter repositions work correctly.
+			if (mode_switch_not_requested) {
+				// Position-only update: accept and let navigator process; no mode switch needed
+				cmd_result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED;
+
+			} else if (unsupported_bits_set) {
 				answer_command(cmd, vehicle_command_ack_s::VEHICLE_CMD_RESULT_UNSUPPORTED);
 
 			} else {

@@ -238,6 +238,11 @@ public:
 		float load_factor;					///< Additional normal load factor.
 
 		float fast_descend;
+
+		// Soaring mode parameters
+		float gliding_airspeed_setpoint{10.0f}; 	///< EAS setpoint during gliding [m/s EAS]; pre-computed by FixedwingPositionControl (fixed or polar); converted to TAS inside calcTrueAirspeedSetpoint.
+		float glide_i_decay{10.0f};			///< Throttle integrator decay time constant during gliding [s]. I(t)=I(0)*exp(-t/tau).
+		float glide_stall_eas{3.0f};			///< Hard absolute minimum EAS [m/s] for glide airspeed floor; set from FW_AIRSPD_STALL.
 	};
 
 	/**
@@ -283,6 +288,7 @@ public:
 	struct Flag {
 		bool airspeed_enabled;			///< Flag if the airspeed sensor is enabled.
 		bool detect_underspeed_enabled;		///< Flag if underspeed detection is enabled.
+		bool gliding_mode_enabled{false};	///< True during engine-off soaring (glide or thermal). Modifies TECS energy weighting, throttle, and integrators.
 	};
 public:
 	TECSControl() = default;
@@ -501,10 +507,11 @@ private:
 	 * @param limit is the specific total energy rate limits in [m²/s³].
 	 * @param specific_energy_rate is the specific energy rates in [m²/s³].
 	 * @param param is the control parameters.
+	 * @param flag is the control flags (used to skip load-factor correction in gliding).
 	 * @return specific total energy rate values in [m²/s³]
 	 */
 	ControlValues _calcThrottleControlSteRate(const STERateLimit &limit, const SpecificEnergyRates &specific_energy_rate,
-			const Param &param) const;
+			const Param &param, const Flag &flag) const;
 
 	/**
 	 * @brief Calculate the throttle control update function.
@@ -536,6 +543,7 @@ private:
 	AlphaFilter<float> _ste_rate_estimate_filter;		///< Low pass filter for the specific total energy rate.
 	float _pitch_integ_state{0.0f};				///< Pitch integrator state [rad].
 	float _throttle_integ_state{0.0f};			///< Throttle integrator state [-].
+	bool  _prev_gliding_mode{false};			///< Gliding mode flag from the previous update cycle; used to detect glide-entry transition.
 
 	// Output
 	DebugOutput _debug_output;				///< Debug output.
@@ -596,6 +604,13 @@ public:
 	}
 
 	void set_detect_underspeed_enabled(bool enabled) { _control_flag.detect_underspeed_enabled = enabled; };
+
+	// Soaring mode interface
+	void set_gliding_mode_enabled(bool enabled) { _control_flag.gliding_mode_enabled = enabled; }
+	bool get_gliding_mode_enabled() const { return _control_flag.gliding_mode_enabled; }
+	void set_gliding_airspeed_setpoint(float eas) { _control_param.gliding_airspeed_setpoint = eas; } ///< Set glide EAS setpoint [m/s]; pre-computed by caller (fixed or polar-optimal); converted to TAS internally.
+	void set_glide_i_decay(float tau) { _control_param.glide_i_decay = math::max(tau, 0.1f); }
+	void set_glide_stall_eas(float eas) { _control_param.glide_stall_eas = math::max(eas, 1.0f); } ///< Set stall EAS floor for glide mode [m/s]; from FW_AIRSPD_STALL.
 
 	// setters for parameters
 	void set_airspeed_measurement_std_dev(float std_dev) {_airspeed_filter_param.airspeed_measurement_std_dev = std_dev;};
@@ -751,12 +766,16 @@ private:
 		.throttle_slewrate = 0.0f,
 		.load_factor_correction = 0.0f,
 		.load_factor = 1.0f,
-		.fast_descend = 0.f
+		.fast_descend = 0.f,
+		.gliding_airspeed_setpoint = 10.0f,
+		.glide_i_decay = 10.0f,
+		.glide_stall_eas = 3.0f,
 	};
 
 	TECSControl::Flag _control_flag{
 		.airspeed_enabled = false,
 		.detect_underspeed_enabled = false,
+		.gliding_mode_enabled = false,
 	};
 
 	/**

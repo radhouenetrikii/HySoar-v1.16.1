@@ -72,9 +72,12 @@
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/airspeed_validated.h>
+#include <uORB/topics/autosoaring_control.h>    // ROS2 soaring command topic (via XRCE-DDS)
+#include <uORB/topics/autosoaring_status.h>     // FMU → companion autosoaring status (via XRCE-DDS)
 #include <uORB/topics/flight_phase_estimation.h>
 #include <uORB/topics/landing_gear.h>
 #include <uORB/topics/launch_detection_status.h>
+#include <uORB/topics/mission.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/normalized_unsigned_setpoint.h>
 #include <uORB/topics/npfg_status.h>
@@ -204,10 +207,12 @@ private:
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
 	uORB::Subscription _airspeed_validated_sub{ORB_ID(airspeed_validated)};
+	uORB::Subscription _autosoaring_control_sub{ORB_ID(autosoaring_control)};  // ROS2 soaring commands
 	uORB::Subscription _wind_sub{ORB_ID(wind)};
 	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
 	uORB::Subscription _global_pos_sub{ORB_ID(vehicle_global_position)};
 	uORB::Subscription _manual_control_setpoint_sub{ORB_ID(manual_control_setpoint)};
+	uORB::Subscription _mission_sub{ORB_ID(mission)};
 	uORB::Subscription _pos_sp_triplet_sub{ORB_ID(position_setpoint_triplet)};
 	uORB::Subscription _trajectory_setpoint_sub{ORB_ID(trajectory_setpoint)};
 	uORB::Subscription _vehicle_air_data_sub{ORB_ID(vehicle_air_data)};
@@ -229,6 +234,8 @@ private:
 	uORB::Publication<normalized_unsigned_setpoint_s> _flaps_setpoint_pub{ORB_ID(flaps_setpoint)};
 	uORB::Publication<normalized_unsigned_setpoint_s> _spoilers_setpoint_pub{ORB_ID(spoilers_setpoint)};
 	uORB::PublicationData<flight_phase_estimation_s> _flight_phase_estimation_pub{ORB_ID(flight_phase_estimation)};
+	uORB::Publication<autosoaring_status_s> _autosoaring_status_pub{ORB_ID(autosoaring_status)};
+	uORB::Publication<vehicle_command_s> _pub_vehicle_command{ORB_ID(vehicle_command)};  // mode-switch commands
 
 	manual_control_setpoint_s _manual_control_setpoint{};
 	position_setpoint_triplet_s _pos_sp_triplet{};
@@ -404,6 +411,32 @@ private:
 
 	bool _tecs_is_running{false};
 
+	// Soaring state (driven by AutosoaringControl uORB from ROS2 companion via XRCE-DDS)
+	autosoaring_control_s _autosoaring_control{};       ///< Last received soaring command message
+	hrt_abstime  _autosoaring_last_recv_us{0};          ///< Timestamp of last valid AutosoaringControl message
+	hrt_abstime  _soaring_mode_cmd_last_us{0};          ///< Debounce: minimum 1 s between mode-switch commands
+	hrt_abstime  _soaring_dds_inhibit_until_us{0};      ///< DDS re-enable blocked until this timestamp (set by soar:off, 5 s cooldown)
+	hrt_abstime  _autosoaring_status_repub_us{0};       ///< Last autosoaring_status republish during DDS inhibit (1 Hz while active)
+	hrt_abstime  _autosoaring_status_periodic_us{0};   ///< Last periodic phase heartbeat while soaring active (2 Hz)
+	bool         _soaring_expect_set_mode{false};       ///< True when CUSTOM_0 (soar:glide/thermal) was just received; next DO_SET_MODE is paired
+	double       _soaring_last_lat{NAN};                ///< Last thermal centre latitude sent to navigator
+	double       _soaring_last_lon{NAN};                ///< Last thermal centre longitude sent to navigator
+	bool         _soaring_last_clockwise{true};         ///< Last turn direction sent to navigator; change triggers re-DO_REPOSITION
+	bool         _alt_max_reached{false};               ///< Hysteresis state: altitude ceiling reached
+	bool         _soaring_forbidden_latched{false};     ///< Latch: soaring disabled below FW_ALT_MIN until companion re-enables
+	bool         _soaring_local_override{false};        ///< True when soaring was enabled via CLI (bypasses alt check + staleness watchdog)
+	bool         _soaring_was_thermal{false};           ///< Previous-cycle thermal state (modes 3 or 4); used to detect thermal→off transition for auto-exit
+	bool         _soaring_was_bank_thermal{false};      ///< Previous-cycle SOARING_THERMAL_BANK (mode 4) state; used to clean up roll override on exit
+	bool         _soaring_was_glide{false};             ///< Previous-cycle glide state (modes 1 or 2); used to detect glide→off transition for auto mission-restore
+	bool         _soaring_was_active{false};            ///< Previous-cycle combined soaring state (glide OR thermal); used for throttle ramp detection
+	hrt_abstime  _soaring_ramp_start_us{0};             ///< Timestamp when glide-exit throttle ramp began; 0 = ramp not active
+	hrt_abstime  _soaring_entry_ramp_start_us{0};       ///< Timestamp when glide-entry throttle ramp began; 0 = ramp not active
+	float        _soaring_pre_glide_thrust{0.0f};       ///< TECS thrust cached one cycle before glide activated; used as entry-ramp start value
+	float        _soaring_bank_angle_cmd_deg{40.0f};   ///< Effective thermal bank angle [deg]: companion bank_angle_cmd or FW_THERMAL_BANK fallback
+	uint16_t     _soaring_mission_resume_seq{0};       ///< mission.current_seq latched on thermal entry (first DO_REPOSITION)
+	bool         _soaring_mission_resume_valid{false}; ///< True if _soaring_mission_resume_seq is meaningful for MISSION_START after thermal
+	bool         _soaring_pending_mission_restore{false}; ///< Defer VEHICLE_CMD_MISSION_START until nav_state==AUTO_MISSION
+
 	// Smooths changes in the altitude tracking error time constant value
 	SlewRate<float> _tecs_alt_time_const_slew_rate;
 
@@ -469,6 +502,8 @@ private:
 	void manual_control_setpoint_poll();
 	void vehicle_attitude_poll();
 	void vehicle_command_poll();
+	void publish_autosoaring_status(uint8_t source, uint8_t soaring_mode_effective, hrt_abstime dds_inhibit_until_us,
+					uint8_t fmu_soaring_phase);
 	void vehicle_control_mode_poll();
 	void vehicle_status_poll();
 	void wind_poll();
@@ -1051,7 +1086,19 @@ private:
 		(ParamFloat<px4::params::FW_TKO_AIRSPD>) _param_fw_tko_airspd,
 
 		(ParamFloat<px4::params::RWTO_PSP>) _param_rwto_psp,
-		(ParamBool<px4::params::FW_LAUN_DETCN_ON>) _param_fw_laun_detcn_on
+		(ParamBool<px4::params::FW_LAUN_DETCN_ON>) _param_fw_laun_detcn_on,
+
+		// Soaring mode parameters (companion sends AutosoaringControl uORB)
+		(ParamFloat<px4::params::FW_GLIDE_AIRSPD>)  _param_fw_glide_airspd,   ///< Fixed glide EAS setpoint [m/s]; used by SOARING_GLIDE_FIXED
+		(ParamFloat<px4::params::FW_AIRSPD_STALL>)  _param_fw_airspd_stall,   ///< Stall EAS [m/s]; used as hard minimum floor for glide airspeed setpoint
+		(ParamFloat<px4::params::FW_ALT_MIN>)        _param_fw_alt_min,        ///< Soaring altitude floor [m]
+		(ParamFloat<px4::params::FW_ALT_MAX>)        _param_fw_alt_max,        ///< Soaring altitude ceiling [m]
+		(ParamFloat<px4::params::FW_ALT_HYST>)       _param_fw_alt_hyst,       ///< Ceiling hysteresis band [m]
+		(ParamFloat<px4::params::FW_GLIDE_I_DECAY>)  _param_fw_glide_i_decay,  ///< Throttle integrator decay tau [s]
+		(ParamFloat<px4::params::FW_POLAR_A>)        _param_fw_polar_a,        ///< Polar: parasitic drag coefficient a [s/m]; used by SOARING_GLIDE_POLAR
+		(ParamFloat<px4::params::FW_POLAR_B>)        _param_fw_polar_b,        ///< Polar: minimum sink rate b [m/s]; used by SOARING_GLIDE_POLAR
+		(ParamFloat<px4::params::FW_GLIDE_RAMP_T>)   _param_fw_glide_ramp_t,   ///< Throttle ramp duration after glide exit [s]
+		(ParamFloat<px4::params::FW_THERMAL_BANK>)   _param_fw_thermal_bank    ///< Default bank angle during thermalling [deg]
 	)
 
 };

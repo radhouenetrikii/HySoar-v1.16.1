@@ -1,0 +1,169 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{List of Symbols}{4}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {part}{I\hspace  {1em}Original TECS System}{9}{part.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1}Physical Background}{9}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Specific Energy Definitions}{9}{subsection.1.1}\protected@file@percent }
+\newlabel{eq:seb}{{5}{9}{Specific Energy Definitions}{equation.1.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}Two-Channel Decoupling}{9}{subsection.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Class Architecture}{9}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Class 1: TECSAirspeedFilter}{10}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}initialize()}{10}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}update()}{10}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Input guard:}{10}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Sensor fallback:}{10}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Prediction step (constant-rate model):}{10}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Kalman gain (solved from continuous Riccati equation):}{11}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Innovation vector:}{11}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Update step:}{11}{section*.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Airspeed floor and rate correction:}{11}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{State update:}{11}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}getState()}{11}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Class 2: TECSAltitudeReferenceModel}{12}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}initialize()}{12}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}update() --- The Two Trajectory Generators}{12}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Input guard:}{12}{section*.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Common jerk/accel/velocity limits pushed each cycle:}{12}{section*.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Two operating modes, selected by \texttt  {setpoint.alt\_rate}:}{12}{section*.26}\protected@file@percent }
+\@writefile{toc}{\contentsline {subparagraph}{Mode A: Height-rate control (alt\_rate is finite)}{12}{section*.27}\protected@file@percent }
+\@writefile{toc}{\contentsline {subparagraph}{Mode B: Altitude control (alt\_rate is NaN)}{13}{section*.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}getAltitudeReference()}{13}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}getHeightRateSetpointDirect()}{13}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Class 3: TECSControl --- All Functions}{13}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}resetIntegrals()}{13}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}initialize()}{14}{subsection.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}update()}{14}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Input guard:}{14}{section*.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Build \texttt  {AltitudePitchControl control\_setpoint}:}{14}{section*.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Run the 6 stages:}{15}{section*.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Debug output fields:}{15}{lstlisting.-7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Internal Stage 0: \_calculateTotalEnergyRateLimit()}{15}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Internal Stage 1: \_calcAirspeedControlOutput()}{15}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{No sensor path:}{15}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Compute speed-rate limits from energy limits:}{15}{section*.34}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proportional speed error:}{16}{section*.35}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Internal Stage 2: \_calcAltitudeControlOutput()}{16}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}Internal Stage 3: \_calcSpecificEnergyRates()}{16}{section.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}Internal Stage 4: \_detectUnderspeed()}{16}{section.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Early exits:}{16}{section*.36}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Cruise-based boundaries:}{17}{section*.37}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Underspeed ratio:}{17}{section*.38}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Effects of $r_u > 0$:}{17}{section*.39}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {11}Internal Stage 5: \_calcPitchControl() and Sub-functions}{17}{section.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.1}\_calcPitchControl() Orchestrator}{17}{subsection.11.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.1.1}Sub-function A: \_updateSpeedAltitudeWeights()}{17}{subsubsection.11.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.1.2}Sub-function B: \_calcPitchControlSebRate()}{18}{subsubsection.11.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.1.3}Sub-function C: \_calcPitchControlUpdate()}{18}{subsubsection.11.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Normalisation (Lambregts 1983):}{18}{section*.40}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Integrator update:}{18}{section*.41}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Anti-windup: do not integrate in the saturating direction:}{18}{lstlisting.-17}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Discrete update:}{18}{section*.43}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.1.4}Sub-function D: \_calcPitchControlOutput()}{19}{subsubsection.11.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Airspeed fallback:}{19}{section*.44}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{PD + integrator:}{19}{section*.45}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.1.5}Sub-function E: Pitch Rate Limit and Final Clamp}{19}{subsubsection.11.1.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {12}Internal Stage 6: \_calcThrottleControl() and Sub-functions}{19}{section.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.1}\_calcThrottleControl() Orchestrator}{19}{subsection.12.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{STE rate LP filter:}{20}{section*.46}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.2}\_calcThrottleControlSteRate()}{20}{subsection.12.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Setpoint:}{20}{section*.47}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Load-factor correction (powered flight only):}{20}{section*.48}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Constrain:}{20}{section*.49}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Estimate:}{20}{section*.50}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.3}\_calcThrottleControlUpdate()}{20}{subsection.12.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Gain scaler from STE rate error to throttle:}{20}{section*.51}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Integrator update (only with airspeed sensor):}{20}{section*.52}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Anti-windup:}{21}{lstlisting.-22}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{NaN guard:}{21}{section*.54}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{No-sensor path:}{21}{section*.55}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.4}\_calcThrottleControlOutput()}{21}{subsection.12.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Bilinear throttle mapping from STE rate:}{21}{section*.56}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Full output:}{21}{section*.57}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{No-sensor fallback:}{21}{section*.58}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Underspeed emergency blend:}{21}{section*.59}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Final clamp:}{21}{section*.60}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {13}Class 4: TECS Outer Facade --- All Functions}{22}{section.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.1}initControlParams()}{22}{subsection.13.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.2}initialize()}{22}{subsection.13.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.3}calcTrueAirspeedSetpoint()}{23}{subsection.13.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Normal powered flight:}{23}{section*.61}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.4}\_setFastDescend()}{23}{subsection.13.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Activation condition:}{23}{section*.62}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Deactivation (ramp down):}{23}{section*.63}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Clear:}{23}{section*.64}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.5}update() --- Full Outer Loop}{23}{subsection.13.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 1: Compute $\Delta t$.}{23}{section*.65}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 2: initControlParams().}{24}{section*.66}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 3: DT\_MIN guard.}{24}{section*.67}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 4: DT\_MAX / first-call reset.}{24}{section*.68}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 5: Normal update path (else branch).}{24}{section*.69}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 6: Populate debug status:}{24}{lstlisting.-30}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 7: Record timestamp.}{25}{section*.71}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {14}Complete Function Inventory}{25}{section.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {part}{II\hspace  {1em}Soaring-Mode Modifications and Their Physical Impact}{25}{part.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {15}Overview: 8 Problems Without Soaring Mode}{26}{section.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {16}M1: Freeze Altitude Reference Model in Glide}{26}{section.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {16.1}Problem}{26}{subsection.16.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {16.2}Fix: Re-initialize Each Cycle}{26}{subsection.16.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {16.3}Impact on Altitude Controller}{27}{subsection.16.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {16.4}Impact on Glide Exit}{27}{subsection.16.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {17}M2: Gravity-Limited Airspeed Acceleration (Stage 1)}{27}{section.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {17.1}Problem}{27}{subsection.17.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {17.2}Fix}{27}{subsection.17.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {17.3}Impact}{27}{subsection.17.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {18}M3: Underspeed Detection Bypass (Stage 4)}{28}{section.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {18.1}Problem}{28}{subsection.18.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {18.2}Fix}{28}{subsection.18.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {18.3}Impact}{28}{subsection.18.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {19}M4: Energy Weighting Override (\_updateSpeedAltitudeWeights)}{28}{section.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {19.1}Problem}{28}{subsection.19.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {19.2}Fix}{28}{subsection.19.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {19.3}Physical Interpretation}{28}{subsection.19.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {20}M5: Throttle Output Hard-Zero (\_calcThrottleControlOutput)}{29}{section.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {20.1}Fix}{29}{subsection.20.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {20.2}Impact}{29}{subsection.20.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {21}M6: Throttle Integrator Exponential Decay (\_calcThrottleControlUpdate)}{29}{section.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {21.1}Problem}{29}{subsection.21.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {21.2}Fix}{29}{subsection.21.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {21.3}Numerical Example}{29}{subsection.21.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {22}M7: Load-Factor STE Correction Disabled (\_calcThrottleControlSteRate)}{30}{section.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {22.1}Problem}{30}{subsection.22.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {22.2}Fix}{30}{subsection.22.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {22.3}Impact}{30}{subsection.22.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {23}M8: Pitch Integrator Partial Reset at Entry and Exit}{30}{section.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {23.1}Entry Problem}{30}{subsection.23.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {23.2}Exit Problem}{30}{subsection.23.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {23.3}Fix: Symmetric Partial Reset}{30}{subsection.23.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {23.4}Why $\times 0.5$ and not Full Reset?}{31}{subsection.23.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {23.5}Impact}{31}{subsection.23.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {24}M9: Glide Airspeed Setpoint (calcTrueAirspeedSetpoint)}{31}{section.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {24.1}New Glide Path}{31}{subsection.24.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {24.1.1}Why the Old Version Was Wrong}{31}{subsubsection.24.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {24.1.2}New Design}{32}{subsubsection.24.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {24.1.3}Example (SIH 300\,g Model)}{32}{subsubsection.24.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {24.2}Three Airspeed Sources}{32}{subsection.24.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {24.3}Polar Best-Glide Derivation (Mode 2)}{32}{subsection.24.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {24.4}Banked Stall Speed Floor}{33}{subsection.24.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {25}M10: Fast-Descend Suppression (\_setFastDescend)}{33}{section.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {25.1}Problem}{33}{subsection.25.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {25.2}Fix}{33}{subsection.25.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {25.3}Impact}{33}{subsection.25.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {26}New Public API (Soaring Interface)}{33}{section.26}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {27}Complete Modification Summary}{34}{section.27}\protected@file@percent }
+\gdef \@abspage@last{34}

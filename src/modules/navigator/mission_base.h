@@ -331,6 +331,7 @@ protected:
 	mission_s _mission;					/**< Currently active mission*/
 	float _mission_init_climb_altitude_amsl{NAN}; 		/**< altitude AMSL the vehicle will climb to when mission starts */
 	int _inactivation_index{-1}; // index of mission item at which the mission was paused. Used to resume survey missions at previous waypoint to not lose images.
+	int32_t _mission_paused_seq{-1}; /**< current_seq at mission deactivation (e.g. AUTO_LOITER); prevents stale mission uORB from rewinding progress until resume */
 	int _mission_activation_index{-1};					/**< Index of the mission item that will bring the vehicle back to a mission waypoint */
 	bool _speed_replayed_on_activation{false};			/**< Flag indicating if the speed change items have been replayed on activation */
 

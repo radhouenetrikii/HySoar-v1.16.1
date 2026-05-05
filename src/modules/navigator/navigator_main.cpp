@@ -392,17 +392,30 @@ void Navigator::run()
 							rep->current.loiter_pattern = position_setpoint_s::LOITER_TYPE_ORBIT;
 						}
 
-						rep->current.loiter_direction_counter_clockwise = curr->current.loiter_direction_counter_clockwise;
-					}
+					rep->current.loiter_direction_counter_clockwise = curr->current.loiter_direction_counter_clockwise;
+				}
 
-					rep->previous.timestamp = hrt_absolute_time();
+				rep->previous.timestamp = hrt_absolute_time(); // stamp the "previous" leg
 
-					rep->current.valid = true;
-					rep->current.timestamp = hrt_absolute_time();
+				rep->current.valid = true;  // ← CRITICAL: Loiter checks this flag
+				rep->current.timestamp = hrt_absolute_time(); // ← CRITICAL: Loiter checks age < 500ms
 
-					rep->next.valid = false;
+				rep->next.valid = false;
 
-					_time_loitering_after_gf_breach = 0; // have to manually reset this in all LOITER cases
+				// Honour explicit loiter radius and direction in param3.
+				// Convention: |param3| = radius [m]; sign encodes direction:
+				//   param3 > 0  → clockwise (CW)   loiter_direction_counter_clockwise = false
+				//   param3 < 0  → counter-clockwise loiter_direction_counter_clockwise = true
+				//   param3 == 0 or NaN → use NAV_LOITER_RAD default, keep existing direction
+				if (PX4_ISFINITE(cmd.param3) && fabsf(cmd.param3) > FLT_EPSILON) {
+					rep->current.loiter_radius = fabsf(cmd.param3);
+					rep->current.loiter_direction_counter_clockwise = (cmd.param3 < 0.f);
+
+				} else if (!only_alt_change_requested) {
+					rep->current.loiter_radius = get_loiter_radius();
+					// loiter_direction_counter_clockwise stays at navigator default (false = CW)
+				}
+				_time_loitering_after_gf_breach = 0; // have to manually reset this in all LOITER cases
 
 				} else {
 					mavlink_log_critical(&_mavlink_log_pub, "Reposition is outside geofence\t");

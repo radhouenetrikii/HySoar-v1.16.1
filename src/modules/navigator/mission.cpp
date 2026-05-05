@@ -122,6 +122,7 @@ Mission::set_current_mission_index(uint16_t index)
 
 		// User has actively set new index, reset.
 		_inactivation_index = -1;
+		_mission_paused_seq = -1;
 
 		return true;
 	}

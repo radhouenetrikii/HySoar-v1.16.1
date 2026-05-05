@@ -109,3 +109,15 @@ src/systemcmds/topic_listener/listener_generated.cpp
 # colcon
 log/
 keys/
+
+# Gazebo msgs build outputs / generated artifacts
+Tools/simulation/gz/GZ_Msgs/build/
+
+# Shared libraries from builds
+**/*.so
+**/*.so.*
+
+# Protobuf generated code (enable if you do NOT want to commit generated outputs)
+**/*.pb.cc
+**/*.pb.h
+**/*_pb2.py

@@ -1,0 +1,662 @@
+%% report_algorithms.tex
+%% Algorithms of modified PX4 modules — additions highlighted in red
+%% Author: Radhouene
+%% Compiler: pdflatex (two passes for hyperref)
+%%
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\usepackage{titlesec}
+\usepackage{enumitem}
+
+% ── Colour shortcuts ────────────────────────────────────────────────────────
+\newcommand{\new}[1]{\textcolor{red}{#1}}          % ← new/added code
+\newcommand{\myalgnew}[1]{\textcolor{red}{#1}}     % for algorithm env
+
+% ── Algorithm2e style ───────────────────────────────────────────────────────
+\SetKwProg{Function}{Function}{:}{end}
+\SetKwIF{If}{ElseIf}{Else}{if}{then}{else if}{else}{end if}
+\SetKwFor{While}{while}{do}{end while}
+\SetKwFor{ForEach}{for each}{do}{end for}
+\SetKwComment{Comment}{$\triangleright$ }{}
+\DontPrintSemicolon
+
+% ── listings style (inline code) ────────────────────────────────────────────
+\lstset{basicstyle=\ttfamily\small, breaklines=true, frame=none}
+
+% ── Title ───────────────────────────────────────────────────────────────────
+\title{\textbf{Autosoaring PX4 Firmware — Algorithm Specifications}\\
+       \large Additions to Existing Modules\quad(\textcolor{red}{red = new code})}
+\author{Radhouene}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================================
+\section{Overview}
+% ============================================================================
+
+This document presents pseudocode algorithms for all PX4 modules modified as
+part of the autonomous soaring extension.  \textbf{Black text} describes
+stock PX4 behaviour; \textcolor{red}{\textbf{red text}} marks every function,
+block, or variable that was added or changed.
+
+Four modules are covered:
+\begin{enumerate}
+  \item \textbf{TECS} (\texttt{src/lib/tecs/TECS.cpp/.hpp}) — 10 modifications
+        enabling engine-off glide control.
+  \item \textbf{FixedwingPositionControl} (\texttt{src/modules/fw\_pos\_control/}) —
+        6 changes implementing the soaring dispatch loop, authority arbitration,
+        altitude safety, and NPFG bypass.
+  \item \textbf{Commander} (\texttt{src/modules/commander/Commander.cpp}) — CLI
+        soaring sub-commands and \texttt{DO\_REPOSITION} fix.
+  \item \textbf{Navigator} (\texttt{src/modules/navigator/}) — mission-rewind
+        prevention and clean activation.
+\end{enumerate}
+
+% ============================================================================
+\section{Module 1: TECS (Total Energy Control System)}
+% ============================================================================
+
+TECS controls throttle and pitch to track energy setpoints.  All
+\textcolor{red}{red} modifications add a \emph{gliding mode} where the engine
+is off and pitch controls airspeed instead of altitude.
+
+% ----------------------------------------------------------------------------
+\subsection{M1 --- Altitude Reference Freeze (\texttt{TECS::update})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{TECS altitude reference model selection}
+\SetAlgoLined
+\Function{TECS::update(dt, altitude, EAS\_setpoint, ...)}{
+  \tcp{... filter airspeed, compute eas\_to\_tas ...}
+  \new{\If(\Comment*[f]{new: glide mode freezes altitude ref each cycle}){gliding\_mode\_enabled}{
+    frozen\_state $\leftarrow$ \{alt $=$ altitude,\ alt\_rate $=$ hgt\_rate\}\;
+    altitude\_reference\_model.initialize(frozen\_state)\;
+  }
+  \ElseIf{fast\_descend $\approx$ 1}{
+    \tcp{stock: reset during fast descent}
+    altitude\_reference\_model.initialize(init\_state)\;
+  }}
+  \Else{
+    altitude\_reference\_model.update(dt, ...)\;
+  }
+  tas\_sp $\leftarrow$ calcTrueAirspeedSetpoint(eas\_to\_tas, EAS\_setpoint)\;
+  \tcp{... run TECSControl ...}
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M2 --- Gravity-Limited Acceleration Cap (\texttt{\_calcAirspeedControlOutput})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Airspeed rate setpoint cap — glide uses gravity bound}
+\SetAlgoLined
+\Function{\_calcAirspeedControlOutput(input, limit, param, flag)}{
+  \If{flag.airspeed\_enabled}{
+    \new{available\_accel $\leftarrow$ \textbf{if} gliding\_mode\_enabled
+        \textbf{then} $|$STE\_rate\_min$|$ \textbf{else} STE\_rate\_max\;}
+    \new{\Comment{gravity is the only source of kinetic energy gain in glide}}
+    max\_tas\_rate\_sp $\leftarrow$ (fast\_descend$\cdot$0.5 + 0.5)
+        $\times$ \new{available\_accel} / tas\;
+    airspeed\_rate\_output $\leftarrow$
+        clamp((tas\_sp $-$ tas) $\times$ gain, min\_tas\_rate\_sp, max\_tas\_rate\_sp)\;
+  }
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M3 --- Underspeed Detection Bypass (\texttt{\_detectUnderspeed})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Underspeed detection — bypassed in glide}
+\SetAlgoLined
+\Function{\_detectUnderspeed(input, limit, param, flag)}{
+  \new{\If(\Comment*[f]{glide speed is below cruise trim; bypass falsely triggers}){gliding\_mode\_enabled}{
+    \_ratio\_undersped $\leftarrow$ 0\;
+    \Return\;
+  }}
+  \tcp{stock underspeed detection using cruise trim boundary ...}
+  tas\_error\_bound $\leftarrow$ tas\_error\_percentage $\times$ equiv\_airspeed\_trim\;
+  \_ratio\_undersped $\leftarrow$ clamp(...)\;
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M4 --- Energy Weighting Override (\texttt{\_updateSpeedAltitudeWeights})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Speed/altitude weighting — full speed-on-elevator in glide}
+\SetAlgoLined
+\Function{\_updateSpeedAltitudeWeights(param, flag)}{
+  \new{\If(\Comment*[f]{pitch controls airspeed; altitude follows naturally}){gliding\_mode\_enabled}{
+    weight.spe\_weighting $\leftarrow$ 0\;
+    weight.ske\_weighting $\leftarrow$ 2\;
+    \Return weight\;
+  }}
+  \tcp{stock weighting from pitch\_speed\_weight parameter ...}
+  pitch\_speed\_weight $\leftarrow$ clamp(param.pitch\_speed\_weight, 0, 2)\;
+  weight.ske\_weighting $\leftarrow$ ...\;
+  \Return weight\;
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M5 --- Throttle Hard-Zero (\texttt{\_calcThrottleControlOutput})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Throttle output — hard zero in glide}
+\SetAlgoLined
+\Function{\_calcThrottleControlOutput(limit, ste\_rate, param, flag)}{
+  \new{\If(\Comment*[f]{engine must be off; return throttle\_min directly}){gliding\_mode\_enabled}{
+    \Return param.throttle\_min\;
+  }}
+  \tcp{stock PI throttle output ...}
+  STE\_rate\_to\_thr $\leftarrow$ 1 / (STE\_rate\_max $-$ STE\_rate\_min)\;
+  throttle\_sp $\leftarrow$ ...\;
+  \Return clamp(throttle\_sp, throttle\_min, throttle\_max)\;
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M6 --- Throttle Integrator Exponential Decay (\texttt{\_calcThrottleControlUpdate})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Throttle integrator — exponential decay in glide}
+\SetAlgoLined
+\Function{\_calcThrottleControlUpdate(dt, limit, ste\_rate, param, flag)}{
+  \new{\If(\Comment*[f]{decay instead of wind-up; avoids spike on power restore}){gliding\_mode\_enabled}{
+    decay $\leftarrow$ max(param.glide\_i\_decay, 0.1)\;
+    \_throttle\_integ\_state $\leftarrow$
+        \_throttle\_integ\_state $-$ dt $\times$ \_throttle\_integ\_state / decay\;
+    \Return\;
+  }}
+  \tcp{stock PI integrator accumulation ...}
+  STE\_rate\_error $\leftarrow$ ste\_rate.setpoint $-$ ste\_rate.estimate\;
+  \_throttle\_integ\_state $+= $ ...\;
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M7 --- Load-Factor STE Correction Disabled (\texttt{\_calcThrottleControlSteRate})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{STE rate setpoint — load factor skipped in glide}
+\SetAlgoLined
+\Function{\_calcThrottleControlSteRate(limit, sp\_rates, param, flag)}{
+  \new{\If(\Comment*[f]{throttle is zero anyway; correction only pollutes debug signal}){NOT gliding\_mode\_enabled}{
+    ste\_rate.setpoint $+=$ load\_factor\_correction $\times$ (load\_factor $-$ 1)\;
+  }}
+  ste\_rate.setpoint $\leftarrow$ clamp(ste\_rate.setpoint, STE\_rate\_min, STE\_rate\_max)\;
+  \Return ste\_rate\;
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M8 --- Pitch Integrator Partial Reset (\texttt{\_calcPitchControl})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Pitch control — symmetric integrator reset at glide transitions}
+\SetAlgoLined
+\Function{\_calcPitchControl(dt, input, sp\_rates, param, flag)}{
+  \new{\If(\Comment*[f]{entry: cruise bias fights speed SP; halve to reduce overshoot}){gliding\_mode\_enabled AND NOT \_prev\_gliding\_mode}{
+    \_pitch\_integ\_state $\leftarrow$ \_pitch\_integ\_state $\times$ 0.5\;
+  }
+  \ElseIf(\Comment*[f]{exit: speed-control bias causes pitch spike; damp symmetrically}){NOT gliding\_mode\_enabled AND \_prev\_gliding\_mode}{
+    \_pitch\_integ\_state $\leftarrow$ \_pitch\_integ\_state $\times$ 0.5\;
+  }
+  \_prev\_gliding\_mode $\leftarrow$ gliding\_mode\_enabled\;}
+  weight $\leftarrow$ \_updateSpeedAltitudeWeights(param, flag)\;
+  \tcp{... SEB rate, integrator update, pitch output, rate limit ...}
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M9 --- Glide Airspeed Setpoint (\texttt{calcTrueAirspeedSetpoint})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Airspeed setpoint — glide path bypasses powered-flight minimum}
+\SetAlgoLined
+\Function{TECS::calcTrueAirspeedSetpoint(eas\_to\_tas, eas\_setpoint)}{
+  \new{\If(\Comment*[f]{use pre-computed glide EAS; do not clamp to FW\_AIRSPD\_MIN}){gliding\_mode\_enabled}{
+    \If{gliding\_airspeed\_setpoint $>$ 0 AND isfinite}{
+      tas\_sp $\leftarrow$ eas\_to\_tas $\times$ gliding\_airspeed\_setpoint\;
+      tas\_stall $\leftarrow$ eas\_to\_tas $\times$ glide\_stall\_eas\;
+      \Comment{floor = FW\_AIRSPD\_STALL converted to TAS, not FW\_AIRSPD\_MIN}
+      glide\_floor $\leftarrow$ max(tas\_stall,\ tas\_min $\times$ $\sqrt{n_z}$ $\times$ 0.5)\;
+      \Return clamp(tas\_sp, glide\_floor, tas\_max)\;
+    }
+    \Return clamp(eas\_to\_tas $\times$ equiv\_airspeed\_trim, tas\_min, tas\_max)\;
+  }}
+  \Return lerp(eas\_to\_tas $\times$ eas\_setpoint,\ tas\_max,\ fast\_descend)\;
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{M10 --- Fast-Descend Suppression (\texttt{\_setFastDescend})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Fast descend — suppressed entirely in glide}
+\SetAlgoLined
+\Function{TECS::\_setFastDescend(alt\_setpoint, alt)}{
+  \new{\If(\Comment*[f]{glide is intentionally below alt SP; suppress fast-descend}){gliding\_mode\_enabled}{
+    \_fast\_descend $\leftarrow$ 0\;
+    \_enabled\_fast\_descend\_timestamp $\leftarrow$ 0\;
+    \Return\;
+  }}
+  \tcp{stock: activate when alt $>$ alt\_setpoint + alt\_err\_fd ...}
+}
+\end{algorithm}
+
+% ============================================================================
+\section{Module 2: FixedwingPositionControl}
+% ============================================================================
+
+% ----------------------------------------------------------------------------
+\subsection{C1 --- DDS Poll and Authority Arbitration (\texttt{Run()})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{DDS poll: inhibit, CLI override, staleness watchdog}
+\SetAlgoLined
+\Function{FixedwingPositionControl::Run()}{
+  \tcp{... update local position, parameters ...}
+  \new{\tcp{--- ADDED: DDS soaring poll ---}
+  \If{autosoaring\_control\_sub.update(soaring\_msg)}{
+    now $\leftarrow$ hrt\_absolute\_time()\;
+    dds\_inhibited $\leftarrow$ (dds\_inhibit\_until\_us $>$ 0 AND now $<$ dds\_inhibit\_until\_us)\;
+    dds\_wants\_soaring $\leftarrow$ (soaring\_msg.soaring\_mode $\neq$ OFF)\;
+    \If(\Comment*[f]{soar:off cooldown active; ignore re-enable}){dds\_inhibited AND dds\_wants\_soaring}{
+      \tcp{drop message}
+    }
+    \Else{
+      \If{NOT dds\_wants\_soaring}{
+        dds\_inhibit\_until\_us $\leftarrow$ 0\;
+      }
+      \If(\Comment*[f]{CLI lock? then DDS must not overwrite}){NOT \_soaring\_local\_override}{
+        prev\_thermal $\leftarrow$ (autosoaring\_control.mode $\in$ \{3,4\})\;
+        new\_thermal $\leftarrow$ (soaring\_msg.mode $\in$ \{3,4\})\;
+        \_autosoaring\_control $\leftarrow$ soaring\_msg\;
+        autosoaring\_last\_recv\_us $\leftarrow$ now\;
+        \If(\Comment*[f]{thermal just activated: reset loiter anchor + debounce}){NOT prev\_thermal AND new\_thermal}{
+          soaring\_mode\_cmd\_last\_us $\leftarrow$ 0\;
+          soaring\_last\_lat/lon $\leftarrow$ NAN\;
+        }
+      }
+    }
+  }
+  \tcp{--- Staleness watchdog (DDS path only) ---}
+  \If{NOT \_soaring\_local\_override AND autosoaring\_last\_recv\_us $>$ 0
+      AND elapsed $>$ 2\,s}{
+    \_autosoaring\_control.soaring\_mode $\leftarrow$ OFF\;
+    PX4\_WARN("companion silent $>$2 s")\;
+  }}
+  vehicle\_command\_poll()\;
+  \tcp{... set\_control\_mode\_current, dispatch switch ...}
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{C2 --- CLI Soaring Commands (\texttt{vehicle\_command\_poll()})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{vehicle\_command\_poll — CUSTOM\_0 and DO\_SET\_MODE}
+\SetAlgoLined
+\Function{vehicle\_command\_poll()}{
+  \While{vehicle\_command\_sub.update(cmd)}{
+    \If{cmd.command $=$ DO\_GO\_AROUND}{...} \tcp{stock}
+    \ElseIf{cmd.command $=$ DO\_CHANGE\_SPEED}{...} \tcp{stock}
+    \new{\ElseIf(\Comment*[f]{ADDED: soaring CLI path}){cmd.command $=$ CUSTOM\_0}{
+      new\_mode $\leftarrow$ clamp((int)cmd.param1, 0, 4)\;
+      \_autosoaring\_control.soaring\_mode $\leftarrow$ new\_mode\;
+      \If{cmd.param3 $>$ 0}{ \_autosoaring\_control.loiter\_radius\_m $\leftarrow$ cmd.param3\;}
+      \If{isfinite(cmd.param2) AND cmd.param2 $>$ 0}{ \_autosoaring\_control.bank\_angle\_cmd $\leftarrow$ cmd.param2\;}
+      enabling $\leftarrow$ (new\_mode $\neq$ 0)\;
+      \If{enabling}{
+        \_soaring\_local\_override $\leftarrow$ \textbf{true}\;
+        dds\_inhibit\_until\_us $\leftarrow$ 0\;
+        soaring\_forbidden\_latched $\leftarrow$ \textbf{false}\;
+        autosoaring\_last\_recv\_us $\leftarrow$ 0\;
+        \_soaring\_expect\_set\_mode $\leftarrow$ \textbf{true}\;
+        soaring\_mode\_cmd\_last\_us $\leftarrow$ 0\;
+        soaring\_last\_lat/lon $\leftarrow$ NAN\;
+        publish\_status(SOURCE\_CLI\_ON, new\_mode)\;
+      }
+      \Else{
+        \_soaring\_local\_override $\leftarrow$ \textbf{false}\;
+        dds\_inhibit\_until\_us $\leftarrow$ now + 5\,s\;
+        autosoaring\_last\_recv\_us $\leftarrow$ 0\;
+        tecs.set\_gliding\_mode\_enabled(\textbf{false})\;
+        publish\_status(SOURCE\_CLI\_OFF, dds\_inhibit\_until\_us)\;
+      }
+    }
+    \ElseIf(\Comment*[f]{ADDED: filter QGC heartbeats / detect soaring exit}){cmd.command $=$ DO\_SET\_MODE AND \_soaring\_local\_override}{
+      \If{\_soaring\_expect\_set\_mode}{
+        \_soaring\_expect\_set\_mode $\leftarrow$ \textbf{false}\; \tcp{consume pairing}
+      }
+      \Else{
+        target\_ok $\leftarrow$ (target $\in$ \{AUTO\_MISSION, AUTO\_LOITER\})\;
+        \If{NOT target\_ok}{
+          soaring\_mode $\leftarrow$ OFF\;
+          \_soaring\_local\_override $\leftarrow$ \textbf{false}\;
+          tecs.set\_gliding\_mode\_enabled(\textbf{false})\;
+        }
+        \tcp{else: QGC heartbeat, keep soaring active}
+      }
+    }}
+  }
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{C3 --- Eager Glide Airspeed Push (\texttt{parameters\_update()})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{parameters\_update — push glide airspeed to TECS eagerly}
+\SetAlgoLined
+\Function{parameters\_update()}{
+  \tcp{... stock TECS and NPFG parameter setters ...}
+  {\color{red}\tcp{--- ADDED: soaring parameter push ---}
+  polar\_a $\leftarrow$ FW\_POLAR\_A.get()\;
+  polar\_b $\leftarrow$ FW\_POLAR\_B.get()\;
+  v\_polar $\leftarrow$ (polar\_a $>$ 0 AND polar\_b $>$ 0) ? $\sqrt{b/a}$ : 0\;
+  \eIf{mode $=$ GLIDE\_POLAR AND v\_polar $>$ 0}{
+    tecs.set\_gliding\_airspeed\_setpoint(v\_polar)\;
+  }{
+    tecs.set\_gliding\_airspeed\_setpoint(FW\_GLIDE\_AIRSPD)\;
+  }
+  tecs.set\_glide\_i\_decay(FW\_GLIDE\_I\_DECAY)\;
+  tecs.set\_glide\_stall\_eas(FW\_AIRSPD\_STALL)\;}
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{C4 --- Soaring Dispatch Block (\texttt{control\_auto()})}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{control\_auto — full soaring dispatch (9 steps)}
+\SetAlgoLined
+\Function{control\_auto(...)}{
+  {\color{red}\tcp{--- ADDED: soaring pre-dispatch block ---}
+  \tcp{Step 1: extract mode variables}
+  soaring\_cmd $\leftarrow$ \_autosoaring\_control.soaring\_mode\;
+  glide\_cmd $\leftarrow$ (mode $\in$ \{1,2\})\;
+  thermal\_cmd $\leftarrow$ (mode $\in$ \{3,4\})\;
+  soaring\_allowed $\leftarrow$ (soaring\_cmd $\neq$ OFF) AND (override OR NOT latched)\;
+  \tcp{Step 2: altitude floor --- FW\_ALT\_MIN (enforced on ALL paths)}
+  \If{soaring\_requested AND altitude $<$ FW\_ALT\_MIN}{
+    \If{NOT soaring\_forbidden\_latched}{
+      soaring\_forbidden\_latched $\leftarrow$ \textbf{true}\;
+      \If{\_soaring\_local\_override}{
+        \_soaring\_local\_override $\leftarrow$ \textbf{false}\;
+        PX4\_WARN("CLI override released: below FW\_ALT\_MIN")\;
+      }
+    }
+  }
+  \tcp{Step 3: altitude ceiling FW\_ALT\_MAX with hysteresis}
+  alt\_max\_reached $\leftarrow$ update\_hysteresis(altitude, FW\_ALT\_MAX, FW\_ALT\_HYST)\;
+  \tcp{Step 4: effective mode flags}
+  effective\_glide $\leftarrow$ soaring\_allowed AND (glide\_cmd OR alt\_max\_reached)\;
+  effective\_thermal $\leftarrow$ soaring\_allowed AND thermal\_cmd AND NOT alt\_max\_reached\;
+  effective\_thermal\_bank $\leftarrow$ effective\_thermal AND (mode $=$ 4)\;
+  \tcp{Step 5: TECS flag and airspeed injection}
+  tecs.set\_gliding\_mode\_enabled(effective\_glide OR effective\_thermal)\;
+  \eIf{mode $=$ 1 AND airspeed\_cmd $>$ 0}{
+    tecs.set\_gliding\_airspeed\_setpoint(airspeed\_cmd)\;
+  }{\eIf{mode $=$ 2}{
+    tecs.set\_gliding\_airspeed\_setpoint($\sqrt{b/a}$)\;
+  }{
+    tecs.set\_gliding\_airspeed\_setpoint(FW\_GLIDE\_AIRSPD)\;
+  }}
+  \tcp{Step 6: thermal DO\_REPOSITION (first activation or position change)}
+  \If{effective\_thermal AND pos\_changed}{
+    publish VEHICLE\_CMD\_DO\_REPOSITION(lat, lon, altitude, signed\_radius)\;
+  }
+  \tcp{Step 7: glide DO\_SET\_MODE heartbeat (1 s period)}
+  \If{effective\_glide AND elapsed $>$ 1\,s}{
+    publish VEHICLE\_CMD\_DO\_SET\_MODE(AUTO\_MISSION)\;
+  }
+  \tcp{Step 8: thermal exit}
+  \If{soaring\_was\_thermal AND NOT effective\_thermal AND NOT effective\_glide}{
+    publish VEHICLE\_CMD\_DO\_SET\_MODE(AUTO\_MISSION)\;
+  }
+  \tcp{Step 9: glide exit}
+  \If{soaring\_was\_glide AND NOT effective\_glide AND NOT effective\_thermal}{
+    publish VEHICLE\_CMD\_DO\_SET\_MODE(AUTO\_MISSION)\;
+    \_soaring\_local\_override $\leftarrow$ \textbf{false}\;
+  }
+  soaring\_was\_glide $\leftarrow$ effective\_glide\;
+  soaring\_was\_thermal $\leftarrow$ effective\_thermal\;}
+
+  \tcp{--- ADDED: Mode 4 NPFG bypass (C5) ---}
+  \new{\If(\Comment*[f]{skip switch entirely; NPFG would contaminate airspeed ref}){effective\_thermal\_bank}{
+    tecs\_update\_pitch\_throttle(altitude, FW\_GLIDE\_AIRSPD, ...)\;
+    bank\_rad $\leftarrow$ sign $\times$ |bank\_angle\_cmd|\;
+    att\_sp.q\_d $\leftarrow$ Quaternion(roll $=$ bank\_rad, pitch $=$ tecs\_pitch, yaw)\;
+    att\_sp.thrust $\leftarrow$ tecs\_thrust\;
+    \Return\;
+  }}
+
+  \tcp{stock setpoint-type dispatch switch ...}
+  switch(position\_sp\_type) \{LOITER $\to$ control\_auto\_loiter; ...\}
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{C6 --- Symmetric Throttle Ramps}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Throttle ramp on glide entry and exit}
+\SetAlgoLined
+\Function{throttle\_ramp\_logic()}{
+  \new{\tcp{--- ADDED: symmetric entry/exit ramp ---}
+  \If{effective\_soaring AND NOT soaring\_was\_active}{
+    \tcp{Glide entry: cache thrust and start ramp-down}
+    soaring\_pre\_glide\_thrust $\leftarrow$ current\_thrust\;
+    soaring\_entry\_ramp\_start\_us $\leftarrow$ now\;
+  }
+  \If{NOT effective\_soaring AND soaring\_was\_active}{
+    \tcp{Glide exit: start ramp-up}
+    soaring\_ramp\_start\_us $\leftarrow$ now\;
+  }
+  \tcp{Entry ramp: linear interpolation pre\_glide\_thrust → 0}
+  \If{soaring\_entry\_ramp\_start\_us $>$ 0}{
+    alpha $\leftarrow$ elapsed / FW\_GLIDE\_RAMP\_T\;
+    att\_sp.thrust $\leftarrow$ lerp(soaring\_pre\_glide\_thrust, 0, alpha)\;
+  }
+  \tcp{Exit ramp: 0 → normal TECS throttle}
+  \If{soaring\_ramp\_start\_us $>$ 0}{
+    alpha $\leftarrow$ elapsed / FW\_GLIDE\_RAMP\_T\;
+    att\_sp.thrust $\leftarrow$ lerp(0, tecs\_thrust, alpha)\;
+  }}
+}
+\end{algorithm}
+
+% ============================================================================
+\section{Module 3: Commander}
+% ============================================================================
+
+% ----------------------------------------------------------------------------
+\subsection{Commander --- CLI Soaring Sub-commands}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Commander main() — soaring CLI sub-commands}
+\SetAlgoLined
+\Function{Commander::main(argc, argv)}{
+  \tcp{... existing mode / calibration commands ...}
+  \new{\tcp{--- ADDED: soaring sub-commands ---}
+  \If{argv[1] $=$ "soar:glide"}{
+    send\_vehicle\_command(CUSTOM\_0, param1$=$1.0)\;
+    send\_vehicle\_command(DO\_SET\_MODE, AUTO\_MISSION)\;
+  }
+  \ElseIf{argv[1] $=$ "soar:polar"}{
+    send\_vehicle\_command(CUSTOM\_0, param1$=$2.0)\;
+    send\_vehicle\_command(DO\_SET\_MODE, AUTO\_MISSION)\;
+  }
+  \ElseIf{argv[1] $=$ "soar:thermal"}{
+    send\_vehicle\_command(CUSTOM\_0, param1$=$3.0)\;
+    send\_vehicle\_command(DO\_SET\_MODE, AUTO\_LOITER)\;
+  }
+  \ElseIf{argv[1] $=$ "soar:bank"}{
+    send\_vehicle\_command(CUSTOM\_0, param1$=$4.0)\;
+    send\_vehicle\_command(DO\_SET\_MODE, AUTO\_LOITER)\;
+  }
+  \ElseIf{argv[1] $=$ "soar:off"}{
+    send\_vehicle\_command(CUSTOM\_0, param1$=$0.0)\;
+    send\_vehicle\_command(DO\_SET\_MODE, AUTO\_MISSION)\;
+  }}
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{Commander --- DO\_REPOSITION Fix}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{Commander — DO\_REPOSITION param2=0 now accepted}
+\SetAlgoLined
+\Function{handle\_command(cmd)}{
+  \If{cmd $=$ DO\_REPOSITION}{
+    mode\_switch\_not\_requested $\leftarrow$ (param2 AND 0x1 $=$ 0)\;
+    unsupported\_bits\_set $\leftarrow$ (param2 AND 0xFFFE $\neq$ 0)\;
+    \new{\If(\Comment*[f]{ADDED: accept position-only reposition (param2=0)}){mode\_switch\_not\_requested}{
+      cmd\_result $\leftarrow$ ACCEPTED\;
+    }
+    \ElseIf{unsupported\_bits\_set}{
+      answer\_command(UNSUPPORTED)\;
+    }
+    \Else{
+      \tcp{stock: normal mode-switch + reposition}
+    }}
+  }
+}
+\end{algorithm}
+
+% ============================================================================
+\section{Module 4: Navigator}
+% ============================================================================
+
+% ----------------------------------------------------------------------------
+\subsection{MissionBase --- Mission Rewind Prevention}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{MissionBase::updateMavlinkMission — stale uORB guard}
+\SetAlgoLined
+\Function{MissionBase::updateMavlinkMission(new\_mission)}{
+  mission\_items\_changed $\leftarrow$ (new\_mission.mission\_id $\neq$ \_mission.mission\_id)\;
+  \new{\tcp{--- ADDED: prevent stale uORB from rewinding mission progress ---}
+  \If{NOT isActive()
+      AND \_mission\_paused\_seq $\geq$ 0
+      AND NOT mission\_items\_changed
+      AND new\_mission.dataman\_id $=$ \_mission.dataman\_id
+      AND new\_mission.current\_seq $<$ \_mission\_paused\_seq}{
+    new\_mission.current\_seq $\leftarrow$ \_mission\_paused\_seq\;
+    \Comment{Clamp stale QGC seq to the value at pause}
+  }}
+  \_mission $\leftarrow$ new\_mission\;
+  \If{data changed}{ onMissionUpdate(...)\;}
+}
+\end{algorithm}
+
+% ----------------------------------------------------------------------------
+\subsection{MissionBase --- Pause / Resume Sequence Tracking}
+% ----------------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{MissionBase on\_inactivation and on\_activation}
+\SetAlgoLined
+\Function{MissionBase::on\_inactivation()}{
+  \tcp{... stock: disable camera trigger, gimbal, etc. ...}
+  \new{\_mission\_paused\_seq $\leftarrow$ \_mission.current\_seq\;
+  \Comment{Snapshot sequence on exit (e.g. entering AUTO\_LOITER for thermal)}}
+}
+
+\Function{MissionBase::on\_activation()}{
+  \tcp{... stock: check mission restart, update mission, fill cache ...}
+  \new{\_mission\_paused\_seq $\leftarrow$ -1\; \Comment{Guard no longer needed once active}
+  \_navigator$\rightarrow$reset\_triplets()\;
+  \Comment{Clear loiter setpoint so mission starts with a fresh triplet}}
+}
+\end{algorithm}
+
+% ============================================================================
+\section{New uORB Messages}
+% ============================================================================
+
+\begin{algorithm}[H]
+\caption{AutosoaringControl.msg — ROS2 $\to$ FMU command}
+\SetAlgoLined
+\new{
+\textbf{uint8} soaring\_mode \quad \Comment{0=OFF 1=GLIDE\_FIXED 2=GLIDE\_POLAR 3=THERMAL\_LOITER 4=THERMAL\_BANK}\;
+\textbf{float32} airspeed\_cmd \quad \Comment{Mode 1 EAS override [m/s]; NaN = use FW\_GLIDE\_AIRSPD}\;
+\textbf{float32} bank\_angle\_cmd \quad \Comment{Thermal bank angle [deg]}\;
+\textbf{float32} loiter\_radius\_m \quad \Comment{Thermal loiter radius [m]; NaN = auto}\;
+\textbf{float32} loiter\_lat, loiter\_lon \quad \Comment{Thermal centre; 0/0 = hover here}\;
+\textbf{bool} loiter\_clockwise \quad \Comment{Turn direction}\;
+}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{AutosoaringStatus.msg — FMU $\to$ ROS2 feedback}
+\SetAlgoLined
+\new{
+\textbf{uint8} source \quad \Comment{0=DDS 1=CLI\_OFF 2=watchdog 3=CLI\_ON}\;
+\textbf{uint8} soaring\_mode\_effective \quad \Comment{Mode actually applied}\;
+\textbf{uint64} dds\_inhibit\_until\_us \quad \Comment{DDS inhibit expiry; 0 = no inhibit}\;
+\textbf{uint8} fmu\_soaring\_phase \quad \Comment{0=CRUISE 1=GLIDING 2=SEARCHING 3=CENTERING 4=THERMAL}\;
+}
+\end{algorithm}
+
+% ============================================================================
+\section{New Parameters}
+% ============================================================================
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lllp{5cm}}
+\toprule
+Parameter & Default & Unit & Purpose \\
+\midrule
+\new{\texttt{FW\_GLIDE\_AIRSPD}} & 10.0 & m/s & Fixed EAS for SOARING\_GLIDE\_FIXED and thermal hold \\
+\new{\texttt{FW\_ALT\_MIN}} & 100.0 & m & Safety floor — soaring disabled below this \\
+\new{\texttt{FW\_ALT\_MAX}} & 500.0 & m & Ceiling — thermal switches to glide above this \\
+\new{\texttt{FW\_ALT\_HYST}} & 20.0 & m & Hysteresis band below FW\_ALT\_MAX \\
+\new{\texttt{FW\_POLAR\_A}} & 0.003 & s/m & Polar: drag coefficient $a$ (sink $= aV^2+b$) \\
+\new{\texttt{FW\_POLAR\_B}} & 0.5 & m/s & Polar: minimum sink rate $b$ \\
+\new{\texttt{FW\_GLIDE\_I\_DECAY}} & 10.0 & s & Throttle integrator decay time constant \\
+\new{\texttt{FW\_GLIDE\_RAMP\_T}} & 2.0 & s & Throttle ramp duration on glide entry/exit \\
+\new{\texttt{FW\_THERMAL\_BANK}} & 40.0 & deg & Default thermal bank angle \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}
