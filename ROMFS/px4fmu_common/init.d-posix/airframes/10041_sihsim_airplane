@@ -1,10 +1,15 @@
 #!/bin/sh
 #
-# @name Plane SITL for SIH
+# @name Plane SITL for SIH (Phoenix 2400–scaled)
 #
 # @type Plane
 #
 # @maintainer Romain Chiappinelli <romain.chiap@gmail.com>
+#
+# SIH plant approx Phoenix 2400: span 2.40 m, length 1.132 m, mass 1.16 kg,
+# AR 6.5, area 0.886 m², MAC 0.369 m. Aero coeffs from advanced_plane with
+# control moment derivatives ×0.4 (larger surface commands). FW tuning from
+# 4008_gz_advanced_plane as a starting point.
 
 . ${R}etc/init.d/rc.fw_defaults
 
@@ -16,16 +21,47 @@ param set-default SENS_EN_BAROSIM 1
 param set-default SENS_EN_MAGSIM 1
 param set-default SENS_EN_ARSPDSIM 1
 
-param set-default SIH_T_MAX 6
-param set-default SIH_MASS 0.3
-param set-default SIH_IXX 0.00402
-param set-default SIH_IYY 0.0144
-param set-default SIH_IZZ 0.0177
-param set-default SIH_IXZ 0.00046
-param set-default SIH_KDV 0.2
+# Phoenix 2400 mass; inertia ~ advanced_plane × (m_ratio)×(span_ratio)²
+param set-default SIH_MASS 1.16
+param set-default SIH_IXX 0.597
+param set-default SIH_IYY 0.441
+param set-default SIH_IZZ 0.446
+param set-default SIH_IXZ 0.0
+param set-default SIH_KDV 0.0
+param set-default SIH_T_MAX 20
+param set-default SIH_CTRL_EFF 0.12
 
 param set-default SIH_VEHICLE_TYPE 1 	# sih as fixed wing
 param set-default RWTO_TKOFF 1  # enable takeoff from runway (as opposed to launched)
+
+# Origin at MSL so GPS/EKF alt matches QGC relative altitude (default Zurich H0 is 489.4 m).
+param set-default SIH_LOC_H0 0
+
+# Fixed-wing tuning aligned with 4008_gz_advanced_plane
+param set-default FW_LND_ANG 8
+param set-default FW_PR_FF 0.08
+param set-default FW_PR_I 0.3
+param set-default FW_PR_P 0.08
+param set-default FW_RR_FF 0.05
+param set-default FW_RR_I 0.2
+param set-default FW_RR_P 0.03
+param set-default FW_YR_FF 0.3
+param set-default FW_YR_I 0.4
+param set-default FW_YR_P 0.2
+param set-default FW_PSP_OFF 2
+param set-default FW_P_LIM_MAX 32
+param set-default FW_P_LIM_MIN -15
+param set-default FW_SPOILERS_LND 0.4
+param set-default FW_THR_MIN 0.00
+param set-default FW_THR_TRIM 0.25
+param set-default FW_THR_MAX 0.6
+param set-default FW_T_CLMB_R_SP 5
+param set-default FW_T_CLMB_MAX 6
+param set-default FW_T_SINK_MAX 2.7
+param set-default FW_T_SINK_MIN 2.2
+param set-default FW_W_EN 1
+param set-default FW_GLIDE_AIRSPD 12
+param set-default NAV_DLL_ACT 2
 
 param set-default CA_AIRFRAME 1
 param set-default CA_ROTOR_COUNT 1

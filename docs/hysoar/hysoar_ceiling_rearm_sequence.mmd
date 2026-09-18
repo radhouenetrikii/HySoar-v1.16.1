@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant Companion
+    participant FP as FixedwingPositionControl
+
+    Companion->>FP: AutosoaringControl thermal remains requested
+
+    FP->>FP: At FW_ALT_MAX set ceiling latch
+    FP->>FP: effective_glide thermal suppressed by latch
+
+    loop Altitude in hysteresis band above FW_ALT_MAX minus FW_ALT_HYST
+        FP->>FP: Mission glide behavior
+        Companion->>FP: Repeated thermal only does not re-open thermal alone
+    end
+
+    FP->>FP: Below band clears latch store rearm-after timestamp
+
+    Companion->>FP: New thermal DDS sample after timestamp
+    FP->>FP: Thermal allowed again thermal_rearmed

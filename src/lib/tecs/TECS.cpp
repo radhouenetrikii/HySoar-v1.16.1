@@ -413,7 +413,7 @@ TECSControl::SpecificEnergyWeighting TECSControl::_updateSpeedAltitudeWeights(co
 
 	SpecificEnergyWeighting weight;
 
-	
+
 	if (flag.gliding_mode_enabled) {
 		weight.spe_weighting = 0.0f;  // altitude not controlled by pitch in glide
 		weight.ske_weighting = 2.0f;  // full speed control via pitch
@@ -516,7 +516,7 @@ TECSControl::ControlValues TECSControl::_calcPitchControlSebRate(const SpecificE
 void TECSControl::_calcPitchControlUpdate(float dt, const Input &input, const ControlValues &seb_rate,
 		const Param &param)
 {
-	
+
 	if (param.integrator_gain_pitch > FLT_EPSILON) {
 
 		// Normalisation: ΔSEB_rate / Δpitch ≈ TAS × g  (small-angle, SPE-dominant, Lambregts 1983)
@@ -631,7 +631,7 @@ TECSControl::ControlValues TECSControl::_calcThrottleControlSteRate(const STERat
 void TECSControl::_calcThrottleControlUpdate(float dt, const STERateLimit &limit, const ControlValues &ste_rate,
 		const Param &param, const Flag &flag)
 {
-	
+
 	if (flag.gliding_mode_enabled) {
 		const float decay = math::max(param.glide_i_decay, 0.1f);
 		_throttle_integ_state -= dt * _throttle_integ_state / decay;
@@ -751,7 +751,7 @@ float TECS::calcTrueAirspeedSetpoint(float eas_to_tas, float eas_setpoint)
 	if (_control_flag.gliding_mode_enabled) {
 		// gliding_airspeed_setpoint is pre-computed by FixedwingPositionControl:
 		//   SOARING_GLIDE_FIXED  → FW_GLIDE_AIRSPD (or companion airspeed_cmd)
-		//   SOARING_GLIDE_POLAR  → sqrt(FW_POLAR_B / FW_POLAR_A)  (best-glide EAS)
+		//   SOARING_GLIDE_POLAR  → sqrt(FW_POLAR_C / FW_POLAR_A)  (best-glide EAS)
 		//   SOARING_THERMAL_*    → FW_GLIDE_AIRSPD (speed held during thermalling)
 		// TECS only needs to convert EAS → TAS and apply the banked stall floor.
 		if (_control_param.gliding_airspeed_setpoint > FLT_EPSILON &&
@@ -841,13 +841,13 @@ void TECS::update(float pitch, float altitude, float hgt_setpoint, float EAS_set
 
 		// Update Reference model submodule
 		if (_control_flag.gliding_mode_enabled) {
-	
+
 			const TECSAltitudeReferenceModel::AltitudeReferenceState frozen_state{
 				.alt = altitude,
 				.alt_rate = hgt_rate};
 			_altitude_reference_model.initialize(frozen_state);
 
-		} else 
+		} else
 		 if (1.f - _fast_descend < FLT_EPSILON) {
 			// Reset the altitude reference model while in fast descend.
 			const TECSAltitudeReferenceModel::AltitudeReferenceState init_state{
@@ -866,7 +866,7 @@ void TECS::update(float pitch, float altitude, float hgt_setpoint, float EAS_set
 		control_setpoint.altitude_reference = _altitude_reference_model.getAltitudeReference();
 		control_setpoint.altitude_rate_setpoint_direct = _altitude_reference_model.getHeightRateSetpointDirect();
 		control_setpoint.tas_setpoint = calcTrueAirspeedSetpoint(eas_to_tas, EAS_setpoint);
-	
+
 
 		const TECSControl::Input control_input{ .altitude = altitude,
 							.altitude_rate = hgt_rate,

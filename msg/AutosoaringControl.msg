@@ -20,7 +20,7 @@ uint8   soaring_mode            # Active soaring mode (see constants below)
 
 uint8 SOARING_OFF             = 0   # Normal powered flight
 uint8 SOARING_GLIDE_FIXED     = 1   # Engine-off glide, fixed EAS = FW_GLIDE_AIRSPD (or airspeed_cmd)
-uint8 SOARING_GLIDE_POLAR     = 2   # Engine-off glide, polar best-glide EAS = sqrt(FW_POLAR_B/FW_POLAR_A)
+uint8 SOARING_GLIDE_POLAR     = 2   # Engine-off glide, polar best-glide EAS = sqrt(FW_POLAR_C/FW_POLAR_A)
 uint8 SOARING_THERMAL_LOITER  = 3   # Thermalling, radius-guided loiter via navigator
 uint8 SOARING_THERMAL_BANK    = 4   # Thermalling, direct bank-angle command (companion controls centering)
 

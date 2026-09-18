@@ -1,0 +1,44 @@
+%% Baseline PX4 TECS — concise steps with parallel altitude/speed paths
+
+flowchart TB
+    A["1. Aircraft state<br/>altitude, climb rate, measured airspeed"]
+    B["2. Timing / initialization guard"]
+
+    subgraph ALT["Altitude path"]
+        C1["Altitude setpoint<br/>from Navigator / mission"]
+        C2["Altitude reference model<br/>smooths h_ref and hdot_ref"]
+        C3["Altitude-rate command<br/>from altitude error + reference-rate feedforward"]
+        C4["Potential-energy rate<br/>SPE_dot_sp = g hdot_sp"]
+    end
+
+    subgraph SPD["Airspeed path"]
+        D1["Airspeed setpoint<br/>from navigation/path airspeed demand"]
+        D2["Airspeed filter<br/>smooths TAS and TAS rate"]
+        D3["Airspeed-rate command<br/>from TAS setpoint error, energy-limited"]
+        D4["Kinetic-energy rate<br/>SKE_dot_sp = TAS_sp TASdot_sp"]
+    end
+
+    E["3. Combine SPE and SKE rates<br/>setpoints and measured estimates"]
+    F["4. Underspeed check and speed/altitude weighting"]
+    G["5. Pitch loop<br/>regulates energy balance"]
+    H["6. Throttle loop<br/>regulates total energy"]
+    I["Pitch setpoint"]
+    J["Throttle setpoint"]
+
+    A --> B
+    B --> C1
+    B --> D1
+    A --> D2
+
+    C1 --> C2 --> C3 --> C4 --> E
+    D1 --> D3
+    D2 --> D3 --> D4 --> E
+
+    E --> F
+    F --> G --> I
+    E --> H --> J
+
+    style ALT fill:#f8fff8
+    style SPD fill:#f8fbff
+    style I fill:#e8f4e8
+    style J fill:#e8eef4

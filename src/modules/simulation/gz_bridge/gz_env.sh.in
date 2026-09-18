@@ -15,7 +15,12 @@ export PX4_GZ_MODELS=@PX4_SOURCE_DIR@/Tools/simulation/gz/models
 export PX4_GZ_WORLDS=@PX4_SOURCE_DIR@/Tools/simulation/gz/worlds
 export PX4_GZ_PLUGINS=@PX4_BINARY_DIR@/src/modules/simulation/gz_plugins
 export PX4_GZ_SERVER_CONFIG=@PX4_SOURCE_DIR@/src/modules/simulation/gz_bridge/server.config
+export PX4_GZ_CUSTOM_PLUGINS=@PX4_SOURCE_DIR@/Tools/simulation/gz/GZ_Plugins
 
 export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:$PX4_GZ_MODELS:$PX4_GZ_WORLDS
 export GZ_SIM_SYSTEM_PLUGIN_PATH=$GZ_SIM_SYSTEM_PLUGIN_PATH:$PX4_GZ_PLUGINS
 export GZ_SIM_SERVER_CONFIG_PATH=$PX4_GZ_SERVER_CONFIG
+
+# Custom model plugins (libLiftDragAdvanced1.so, libMulticopterMotorModel.so) — prepend
+# so model.sdf finds them before any stale paths in the user shell profile.
+export GZ_PLUGIN_PATH=$PX4_GZ_CUSTOM_PLUGINS/MulticopterMotorModel/build:$PX4_GZ_CUSTOM_PLUGINS/liftdrag_advanced/build:${GZ_PLUGIN_PATH}

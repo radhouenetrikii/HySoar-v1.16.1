@@ -420,6 +420,7 @@ private:
 	double       _soaring_last_lon{NAN};                ///< Last thermal centre longitude sent to navigator
 	bool         _soaring_last_clockwise{true};         ///< Last turn direction sent to navigator; change triggers re-DO_REPOSITION
 	bool         _alt_max_reached{false};               ///< Hysteresis state: altitude ceiling reached
+	bool         _soaring_thermal_rearm_required{false}; ///< After ceiling: block thermal until companion drops thermal then requests it again
 	bool         _soaring_forbidden_latched{false};     ///< Latch: soaring disabled below FW_ALT_MIN until companion re-enables
 	bool         _soaring_was_thermal{false};           ///< Previous-cycle thermal state (modes 3 or 4); used to detect thermal→off transition for auto-exit
 	bool         _soaring_was_bank_thermal{false};      ///< Previous-cycle SOARING_THERMAL_BANK (mode 4) state; used to clean up roll override on exit
@@ -1091,8 +1092,9 @@ private:
 		(ParamFloat<px4::params::FW_ALT_MAX>)        _param_fw_alt_max,        ///< Soaring altitude ceiling [m]
 		(ParamFloat<px4::params::FW_ALT_HYST>)       _param_fw_alt_hyst,       ///< Ceiling hysteresis band [m]
 		(ParamFloat<px4::params::FW_GLIDE_I_DECAY>)  _param_fw_glide_i_decay,  ///< Throttle integrator decay tau [s]
-		(ParamFloat<px4::params::FW_POLAR_A>)        _param_fw_polar_a,        ///< Polar: parasitic drag coefficient a [s/m]; used by SOARING_GLIDE_POLAR
-		(ParamFloat<px4::params::FW_POLAR_B>)        _param_fw_polar_b,        ///< Polar: minimum sink rate b [m/s]; used by SOARING_GLIDE_POLAR
+		(ParamFloat<px4::params::FW_POLAR_A>)        _param_fw_polar_a,        ///< Polar: quadratic coeff a [s/m]; best-glide EAS = sqrt(c/a)
+		(ParamFloat<px4::params::FW_POLAR_B>)        _param_fw_polar_b,        ///< Polar: linear coeff b (unused for best-glide speed)
+		(ParamFloat<px4::params::FW_POLAR_C>)        _param_fw_polar_c,        ///< Polar: constant term c [m/s]; best-glide EAS = sqrt(c/a)
 		(ParamFloat<px4::params::FW_GLIDE_RAMP_T>)   _param_fw_glide_ramp_t,   ///< Throttle ramp duration after glide exit [s]
 		(ParamFloat<px4::params::FW_THERMAL_BANK>)   _param_fw_thermal_bank    ///< Default bank angle during thermalling [deg]
 	)

@@ -337,3 +337,29 @@ PARAM_DEFINE_FLOAT(SIH_T_TAU, 0.05f);
  * @group Simulation In Hardware
  */
 PARAM_DEFINE_INT32(SIH_VEHICLE_TYPE, 0);
+
+/**
+ * Apply companion Allen thermals in SIH
+ *
+ * When enabled, simulator_sih reads /fmu/in/sih_thermal_field and subtracts
+ * the Allen (1997) updraft from air-relative velocity (Gazebo LiftDrag equivalent).
+ *
+ * @boolean
+ * @group Simulation In Hardware
+ */
+PARAM_DEFINE_INT32(SIH_THERM_EN, 1);
+
+/**
+ * SIH control-surface aerodynamic effectiveness scale
+ *
+ * Multiplies AdvancedLiftDrag control contributions (aileron/elevator/rudder).
+ * Phoenix 2400 geometry increases area×span vs advanced_plane (~4×), so values
+ * around 0.1–0.2 are needed for larger visible surface commands. 1.0 = Gazebo
+ * baseline derivatives (very responsive on the large wing).
+ *
+ * @min 0.01
+ * @max 2.0
+ * @decimal 2
+ * @group Simulation In Hardware
+ */
+PARAM_DEFINE_FLOAT(SIH_CTRL_EFF, 0.12f);

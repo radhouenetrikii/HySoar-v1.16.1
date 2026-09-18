@@ -139,15 +139,15 @@ FixedwingPositionControl::parameters_update()
 	_tecs.set_integrator_gain_throttle(_param_fw_t_thr_integ.get());
 	_tecs.set_integrator_gain_pitch(_param_fw_t_I_gain_pit.get());
 	// Glide airspeed setpoint: computed here so TECS stays mode-agnostic.
-	// SOARING_GLIDE_POLAR (mode 2) uses polar best-glide EAS = sqrt(b/a).
+	// SOARING_GLIDE_POLAR (mode 2): still-air best-glide EAS = sqrt(c/a) for sink = a*V^2 + b*V + c.
 	// All other soaring modes use FW_GLIDE_AIRSPD (overridable per-cycle by airspeed_cmd).
 	// The active soaring_mode is checked via _autosoaring_control; at parameters_update time
 	// we set the polar value eagerly so the first TECS cycle after a mode-2 activation is correct.
 	{
 		const float polar_a = _param_fw_polar_a.get();
-		const float polar_b = _param_fw_polar_b.get();
-		const float v_polar_eas = (polar_a > FLT_EPSILON && polar_b > FLT_EPSILON)
-					  ? sqrtf(polar_b / polar_a) : 0.0f;
+		const float polar_c = _param_fw_polar_c.get();
+		const float v_polar_eas = (polar_a > FLT_EPSILON && polar_c > FLT_EPSILON)
+					  ? sqrtf(polar_c / polar_a) : 0.0f;
 		const bool polar_mode = (_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_GLIDE_POLAR);
 		_tecs.set_gliding_airspeed_setpoint(polar_mode && v_polar_eas > FLT_EPSILON
 						    ? v_polar_eas : _param_fw_glide_airspd.get());
@@ -949,24 +949,49 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 		_soaring_forbidden_latched = false;
 	}
 
-	// Altitude ceiling hysteresis (thermal → glide when ceiling reached)
+	// Altitude ceiling hysteresis (thermal → glide when ceiling reached).
+	// Crossing the ceiling while thermalling requires a *new* thermal request after
+	// the companion has left thermal (glide or OFF). Continuous republish of the same
+	// thermal command must not yo-yo in the same column.
+	if (!soaring_requested || !thermal_cmd) {
+		_soaring_thermal_rearm_required = false;
+	}
+
 	if (_alt_max_reached && current_altitude < (alt_max - alt_hyst)) {
 		_alt_max_reached = false;
 	}
 
 	if (current_altitude >= alt_max) {
+		if (!_alt_max_reached && thermal_cmd) {
+			_soaring_thermal_rearm_required = true;
+			PX4_INFO("Soaring: ceiling %.0f m — thermal blocked until new request", (double)alt_max);
+		}
+
 		_alt_max_reached = true;
 	}
 
 	// soaring_allowed: DDS command is accepted only when altitude latch is clear
 	const bool soaring_allowed = soaring_requested && !_soaring_forbidden_latched;
+	const bool thermal_rearmed = !_soaring_thermal_rearm_required;
 
 	// Effective modes: altitude ceiling forces glide even when thermal was requested.
-	// When ceiling forces a thermal→glide transition, fall back to SOARING_GLIDE_FIXED.
-	const bool effective_glide         = soaring_allowed && (glide_cmd || _alt_max_reached);
-	const bool effective_thermal       = soaring_allowed && thermal_cmd && !_alt_max_reached;
+	// After the cap, stay in glide until the companion drops thermal then requests it again.
+	const bool effective_glide         = soaring_allowed && (glide_cmd || _alt_max_reached
+					     || (thermal_cmd && !thermal_rearmed));
+	const bool effective_thermal       = soaring_allowed && thermal_cmd && !_alt_max_reached && thermal_rearmed;
 	const bool effective_thermal_bank  = effective_thermal &&
 					     (soaring_cmd == autosoaring_control_s::SOARING_THERMAL_BANK);
+
+	// Bank angle (φ_max) — resolve before thermal entry so radius / TECS use the current command.
+	// Stall margin is enforced by TECS airspeed (never by blocking DO_REPOSITION).
+	if (soaring_allowed &&
+	    PX4_ISFINITE(_autosoaring_control.bank_angle_cmd) &&
+	    _autosoaring_control.bank_angle_cmd > FLT_EPSILON) {
+		_soaring_bank_angle_cmd_deg = _autosoaring_control.bank_angle_cmd;
+
+	} else {
+		_soaring_bank_angle_cmd_deg = _param_fw_thermal_bank.get();
+	}
 
 	const hrt_abstime now = hrt_absolute_time();
 
@@ -991,26 +1016,6 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 							  (fabs(lat - _soaring_last_lat) > 1e-5 ||
 							   fabs(lon - _soaring_last_lon) > 1e-5);
 
-			// T3: Before the very first thermal roll, verify we have sufficient airspeed
-			// margin for the commanded bank angle.  Compute the load-factor-corrected
-			// minimum EAS and apply a 5 % stall margin.  If too slow, suppress the
-			// DO_REPOSITION this cycle; _soaring_last_lat stays NAN so we retry next cycle.
-			bool airspeed_ok_for_thermal = true;
-
-			if (first_activation && _airspeed_valid) {
-				const float bank_rad_thermal    = math::radians(_soaring_bank_angle_cmd_deg);
-				const float load_factor_thermal = 1.f / math::max(cosf(bank_rad_thermal), 0.1f);
-				const float eas_banked_floor    = _performance_model.getMinimumCalibratedAirspeed(load_factor_thermal) * 1.05f;
-
-				if (_airspeed_eas < eas_banked_floor) {
-					airspeed_ok_for_thermal = false;
-					PX4_WARN("Autosoaring: thermal entry delayed - EAS %.1f < banked-stall floor"
-						 " %.1f m/s (bank %.0f deg); waiting for speed",
-						 (double)_airspeed_eas, (double)eas_banked_floor,
-						 (double)_soaring_bank_angle_cmd_deg);
-				}
-			}
-
 			// Also re-send when turn direction flips (clockwise ↔ CCW): navigator must
 		// receive a new DO_REPOSITION with the updated radius sign.
 		// direction_changed is suppressed on first_activation (direction is already
@@ -1018,8 +1023,8 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 		const bool direction_changed = !first_activation &&
 					       (_autosoaring_control.loiter_clockwise != _soaring_last_clockwise);
 
-		const bool pos_changed = (first_activation && airspeed_ok_for_thermal) ||
-					 explicit_pos_changed || direction_changed;
+		// Enter immediately — no airspeed gate. Stall margin is TECS airspeed + r_min open.
+		const bool pos_changed = first_activation || explicit_pos_changed || direction_changed;
 
 		if (pos_changed) {
 			if (first_activation) {
@@ -1041,9 +1046,12 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 
 				// Enforce minimum loiter radius from bank angle limit to avoid exceeding the
 				// maximum bank angle during thermalling.  Physics: r_min = V²/(g·tan(φ_max)).
-				// Uses companion bank_angle_cmd if provided, else FW_THERMAL_BANK param.
+				// Prefer current TAS when valid so a slow entry opens the circle instead of
+				// commanding an unreachable bank.
 				const float bank_max_rad = math::radians(_soaring_bank_angle_cmd_deg);
-				const float v_tas        = _param_fw_glide_airspd.get() * _eas2tas;
+				const float v_tas        = _airspeed_valid
+							   ? (_airspeed_eas * _eas2tas)
+							   : (_param_fw_glide_airspd.get() * _eas2tas);
 				const float r_min_bank   = (v_tas * v_tas) /
 							    (CONSTANTS_ONE_G * math::max(tanf(bank_max_rad), 0.1f));
 
@@ -1103,11 +1111,16 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 	// All soaring modes (1–4) share engine-off / speed-on-elevator behaviour in TECS.
 	_tecs.set_gliding_mode_enabled(effective_glide || effective_thermal);
 
-	// Apply per-cycle dynamic overrides from the companion (NaN = keep PX4 default).
+	// Apply per-cycle dynamic airspeed overrides from the companion (NaN = keep PX4 default).
+	// Bank angle was resolved above (before thermal entry).
 	if (soaring_allowed) {
-		// Airspeed setpoint — used only by SOARING_GLIDE_FIXED (mode 1).
-		// SOARING_GLIDE_POLAR uses polar-derived EAS (set in parameters_update).
-		// Thermal modes always use FW_GLIDE_AIRSPD as the hold speed.
+		// Airspeed setpoint:
+		//   mode 1 (GLIDE_FIXED): companion airspeed_cmd if set, else FW_GLIDE_AIRSPD
+		//   mode 2 (GLIDE_POLAR): polar best-glide EAS = sqrt(c/a)
+		//   modes 3/4 (thermal): max(FW_GLIDE_AIRSPD, banked-stall floor, airspeed_cmd)
+		//     Mode 3 uses geometry bank φ = atan(V²/(gR)) capped by φ_max.
+		//     Mode 4 uses commanded φ_max.
+		//     Never block entry — TECS pitches for speed while the loiter is already active.
 		if (soaring_cmd == autosoaring_control_s::SOARING_GLIDE_FIXED &&
 		    PX4_ISFINITE(_autosoaring_control.airspeed_cmd) &&
 		    _autosoaring_control.airspeed_cmd > FLT_EPSILON) {
@@ -1116,26 +1129,53 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 		} else if (soaring_cmd == autosoaring_control_s::SOARING_GLIDE_POLAR) {
 			// Recompute polar best-glide EAS each cycle (air density may change).
 			const float a = _param_fw_polar_a.get();
-			const float b = _param_fw_polar_b.get();
-			if (a > FLT_EPSILON && b > FLT_EPSILON) {
-				_tecs.set_gliding_airspeed_setpoint(sqrtf(b / a));
+			const float c = _param_fw_polar_c.get();
+
+			if (a > FLT_EPSILON && c > FLT_EPSILON) {
+				_tecs.set_gliding_airspeed_setpoint(sqrtf(c / a));
 			}
+
+		} else if (effective_thermal) {
+			const float bank_max_rad = math::radians(_soaring_bank_angle_cmd_deg);
+			float bank_rad = bank_max_rad;
+
+			// Mode 3: actual bank follows loiter geometry, not φ_max.
+			if (!effective_thermal_bank) {
+				const float v_tas = _airspeed_valid
+						    ? (_airspeed_eas * _eas2tas)
+						    : (_param_fw_glide_airspd.get() * _eas2tas);
+				const float companion_radius = _autosoaring_control.loiter_radius_m;
+				const float r_min_bank = (v_tas * v_tas) /
+							 (CONSTANTS_ONE_G * math::max(tanf(bank_max_rad), 0.1f));
+				float radius_m = r_min_bank;
+
+				if (PX4_ISFINITE(companion_radius) && companion_radius > FLT_EPSILON) {
+					radius_m = math::max(companion_radius, r_min_bank);
+				}
+
+				const float bank_geom = atanf((v_tas * v_tas) /
+							      (CONSTANTS_ONE_G * math::max(radius_m, 1.f)));
+				bank_rad = math::min(bank_geom, bank_max_rad);
+			}
+
+			const float load_factor = 1.f / math::max(cosf(bank_rad), 0.1f);
+			const float eas_banked_floor =
+				_performance_model.getMinimumCalibratedAirspeed(load_factor) * 1.05f;
+			float thermal_eas = math::max(_param_fw_glide_airspd.get(), eas_banked_floor);
+
+			if (PX4_ISFINITE(_autosoaring_control.airspeed_cmd) &&
+			    _autosoaring_control.airspeed_cmd > FLT_EPSILON) {
+				thermal_eas = math::max(thermal_eas, _autosoaring_control.airspeed_cmd);
+			}
+
+			_tecs.set_gliding_airspeed_setpoint(thermal_eas);
 
 		} else {
 			_tecs.set_gliding_airspeed_setpoint(_param_fw_glide_airspd.get());
 		}
 
-		// Bank angle — used by thermal modes (3 and 4).
-		if (PX4_ISFINITE(_autosoaring_control.bank_angle_cmd) &&
-		    _autosoaring_control.bank_angle_cmd > FLT_EPSILON) {
-			_soaring_bank_angle_cmd_deg = _autosoaring_control.bank_angle_cmd;
-		} else {
-			_soaring_bank_angle_cmd_deg = _param_fw_thermal_bank.get();
-		}
-
 	} else {
 		_tecs.set_gliding_airspeed_setpoint(_param_fw_glide_airspd.get());
-		_soaring_bank_angle_cmd_deg = _param_fw_thermal_bank.get();
 	}
 
 	// Detect thermal→off transition: return to powered AUTO_MISSION automatically.

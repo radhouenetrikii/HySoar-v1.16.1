@@ -76,7 +76,7 @@ PARAM_DEFINE_FLOAT(NAV_ACC_RAD, 10.0f);
  *
  * @unit m
  * @min 0.05
- * @max 200.0
+ * @max 600.0
  * @decimal 1
  * @increment 0.5
  * @group Mission

@@ -960,8 +960,9 @@ PARAM_DEFINE_FLOAT(FW_SPOILERS_LND, 0.f);
 /**
  * Minimum altitude for soaring mode
  *
- * Below this altitude soaring is disabled and normal powered mission is forced.
- * A latch prevents re-enabling until the companion computer publishes both flags false.
+ * Height above the local position origin (home), same sense as QGC relative altitude.
+ * Below this value soaring is disabled and normal powered mission is forced.
+ * A latch prevents re-enabling until the companion publishes SOARING_OFF.
  *
  * @unit m
  * @min 50.0
@@ -975,8 +976,9 @@ PARAM_DEFINE_FLOAT(FW_ALT_MIN, 100.0f);
 /**
  * Maximum altitude for soaring mode
  *
- * When this altitude is reached during thermal mode the aircraft switches to glide mode.
- * Returning below FW_ALT_MAX - FW_ALT_HYST re-enables thermal mode.
+ * Height above the local position origin (home). When reached during thermal mode
+ * the aircraft switches to glide mode. Returning below FW_ALT_MAX - FW_ALT_HYST
+ * re-enables thermal mode.
  *
  * @unit m
  * @min 100.0
@@ -1008,7 +1010,7 @@ PARAM_DEFINE_FLOAT(FW_ALT_HYST, 20.0f);
  * Fixed equivalent airspeed (EAS) target used by TECS during SOARING_GLIDE_FIXED (mode 1)
  * and as the hold speed during thermal modes (modes 3 and 4).
  * For polar best-glide (SOARING_GLIDE_POLAR, mode 2) this parameter is ignored and
- * EAS is computed from sqrt(FW_POLAR_B / FW_POLAR_A) instead.
+ * EAS is computed from sqrt(FW_POLAR_C / FW_POLAR_A) instead.
  * TECS internally converts EAS to TAS using the current air-density ratio.
  *
  * @unit m/s
@@ -1021,11 +1023,12 @@ PARAM_DEFINE_FLOAT(FW_ALT_HYST, 20.0f);
 PARAM_DEFINE_FLOAT(FW_GLIDE_AIRSPD, 10.0f);
 
 /**
- * Glide polar parabolic coefficient a  (sink = a*V^2 + b)
+ * Glide polar quadratic coefficient a  (sink = a*V^2 + b*V + c)
  *
- * Fit from flight-test data at ≥3 airspeeds (e.g. 12, 15, 20 m/s):
- * log sink rate vs airspeed and fit a parabola.
- * Used to enforce a physics-based sink-rate limit in the altitude control output.
+ * Quadratic (speed-squared) coefficient of the fitted glide polar.
+ * Must be positive (polar is convex).  Fit from flight-test data at
+ * >=3 airspeeds (e.g. 12, 15, 20 m/s) by least-squares parabola fit.
+ * The best-glide (speed-to-fly) EAS is computed as sqrt(c/a).
  *
  * @unit norm
  * @min 0.0001
@@ -1037,19 +1040,38 @@ PARAM_DEFINE_FLOAT(FW_GLIDE_AIRSPD, 10.0f);
 PARAM_DEFINE_FLOAT(FW_POLAR_A, 0.003f);
 
 /**
- * Glide polar constant term b  (sink = a*V^2 + b)
+ * Glide polar linear coefficient b  (sink = a*V^2 + b*V + c)
  *
- * Minimum sink rate at best-glide airspeed.
- * Fit from level glide flight-test data.
+ * Linear airspeed coefficient of the fitted glide polar.  For a
+ * typical glider this value is negative (sink rate has a minimum
+ * between stall and best-glide speed).  Set to 0 to use the
+ * simplified two-parameter polar (sink = a*V^2 + c).
  *
- * @unit m/s
- * @min 0.1
- * @max 5.0
- * @decimal 2
- * @increment 0.05
+ * @unit norm
+ * @min -1.0
+ * @max 1.0
+ * @decimal 4
+ * @increment 0.0001
  * @group FW Soaring
  */
-PARAM_DEFINE_FLOAT(FW_POLAR_B, 0.50f);
+PARAM_DEFINE_FLOAT(FW_POLAR_B, 0.0f);
+
+/**
+ * Glide polar constant term c  (sink = a*V^2 + b*V + c)
+ *
+ * Constant (zero-speed intercept) of the fitted glide polar.
+ * Must be positive.  The best-glide (speed-to-fly) EAS is
+ * computed from the tangent-from-origin condition and equals
+ * sqrt(c/a) for the full quadratic model.
+ *
+ * @unit m/s
+ * @min 0.05
+ * @max 5.0
+ * @decimal 3
+ * @increment 0.001
+ * @group FW Soaring
+ */
+PARAM_DEFINE_FLOAT(FW_POLAR_C, 0.50f);
 
 /**
  * Throttle ramp time on glide exit

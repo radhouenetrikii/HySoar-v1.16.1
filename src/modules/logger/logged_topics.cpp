@@ -51,6 +51,9 @@ void LoggedTopics::add_default_topics()
 	add_optional_topic("actuator_controls_status_0", 300);
 	add_topic("airspeed", 1000);
 	add_optional_topic("airspeed_validated", 200);
+	add_topic("autosoaring_control", 50);
+	add_topic("autosoaring_status", 50);
+	add_topic("sih_thermal_field", 200);
 	add_optional_topic("autotune_attitude_control_status", 100);
 	add_optional_topic("camera_capture");
 	add_optional_topic("camera_trigger");

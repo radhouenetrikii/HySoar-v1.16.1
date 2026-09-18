@@ -205,6 +205,7 @@ set(msg_files
 	SensorsStatus.msg
 	SensorsStatusImu.msg
 	SensorUwb.msg
+	SihThermalField.msg
 	SensorAirflow.msg
 	SystemPower.msg
 	TakeoffStatus.msg

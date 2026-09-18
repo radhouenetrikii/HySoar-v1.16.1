@@ -1,0 +1,82 @@
+%% Baseline PX4 TECS — reader-oriented steps (powered flight, HySoar off)
+%% Purpose: explain the stock TECS pipeline before showing HySoar glide changes.
+
+flowchart TB
+    subgraph IN["1. Inputs"]
+        A1["Aircraft state: altitude, climb rate, pitch"]
+        A2["Mission request: altitude target, optional vertical-rate target"]
+        A3["Airspeed estimate: EAS, EAS rate, EAS-to-TAS scale"]
+        A4["Airspeed command from navigation"]
+        A5["Aircraft limits and gains: pitch, throttle, climb, sink, filters"]
+    end
+
+    subgraph GUARD["2. Time handling and runtime limits"]
+        B0["Refresh TECS runtime parameters for this cycle"]
+        B1{{"Is dt too small?"}}
+        B1n["Return immediately and keep previous outputs"]
+        B2{{"First cycle or dt too large?"}}
+        B2y["Cold initialize: reset altitude reference, airspeed filter, and controller integrators"]
+        B2z["Compute safe initial pitch and throttle outputs, then skip the normal update path this tick"]
+    end
+
+    subgraph OUTER["3. Prepare smooth references"]
+        C1["Update fast-descend blend if the aircraft is far above the altitude target"]
+        C2["Filter airspeed so TECS uses smooth TAS and TAS-rate estimates"]
+        C3{{"Is fast-descend fully active?"}}
+        C3y["Reset altitude reference to the current aircraft state"]
+        C3n["Otherwise move altitude reference smoothly toward the mission target within climb/sink/jerk limits"]
+        C4["Read altitude reference, reference rate, and any direct height-rate command"]
+        C5["Convert commanded EAS to TAS; blend toward maximum TAS during fast descend"]
+        C6["Pack TECSControl setpoint and measured state"]
+    end
+
+    subgraph INNER["4. Inner TECS energy controller"]
+        D1["Airspeed loop: command TAS-rate from speed error and limit it by available energy rate"]
+        D2{{"Direct height-rate command available?"}}
+        D2y["Use the direct height-rate command"]
+        D2n["Otherwise compute height-rate from altitude error plus reference-rate feedforward"]
+        D3["Convert height-rate and TAS-rate into potential- and kinetic-energy-rate terms"]
+        D4["Detect powered-flight underspeed and compute underspeed ratio"]
+        D5["Choose pitch weights: altitude priority vs speed priority"]
+        D6["Pitch channel: weighted energy-balance error -> pitch setpoint with integrator and pitch limits"]
+        D7["Throttle channel: total-energy-rate error -> throttle with feedforward, damping, integrator, turn-drag compensation"]
+        D8{{"Full fast-descend throttle branch?"}}
+        D8y["Use minimum throttle and do not advance the throttle integrator"]
+        D8n["Otherwise compute throttle, apply underspeed blend, slew limit, and saturation"]
+    end
+
+    subgraph OUT["5. Outputs"]
+        E1["Pitch setpoint"]
+        E2["Throttle setpoint"]
+        E3["TECS status/debug signals"]
+    end
+
+    A1 & A2 & A3 & A4 & A5 --> B0
+    B0 --> B1
+    B1 -->|yes| B1n
+    B1 -->|no| B2
+    B2 -->|yes| B2y --> B2z
+    B2 -->|no| C1
+    C3 -->|yes| C3y --> C4
+    C3 -->|no| C3n --> C4
+    C1 --> C2 --> C3
+    C4 --> C5 --> C6
+
+    C6 --> D1 --> D2
+    D2 -->|yes| D2y --> D3
+    D2 -->|no| D2n --> D3
+    D3 --> D4 --> D5 --> D6 --> D7 --> D8
+    D8 -->|yes| D8y --> E2
+    D8 -->|no| D8n --> E2
+    D6 --> E1
+    B2z --> E1
+    B2z --> E2
+    B2z --> E3
+    D8y --> E3
+    D8n --> E3
+
+    style E1 fill:#e8f4e8
+    style E2 fill:#e8eef4
+    style E3 fill:#f2f2f2
+    style B1n fill:#f8e8e8
+    style B2y fill:#f8ece8

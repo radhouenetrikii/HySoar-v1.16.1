@@ -32,6 +32,13 @@ param set HIL_ACT_FUNC2 202
 param set HIL_ACT_FUNC3 203
 param set HIL_ACT_FUNC4 101
 
+# Real MAIN PWM for bench SIH (Pixhawk IO). Propeller must be removed / ESC unpowered.
+param set-default PWM_MAIN_FUNC1 201
+param set-default PWM_MAIN_FUNC2 202
+param set-default PWM_MAIN_FUNC3 203
+param set-default PWM_MAIN_FUNC4 101
+param set-default SIH_ACT_OUT 1
+
 # set SYS_HITL to 2 to start the SIH and avoid sensors startup
 param set-default SYS_HITL 2
 
@@ -39,13 +46,15 @@ param set-default SYS_HITL 2
 # - without real battery
 param set-default CBRK_SUPPLY_CHK 894281
 
-param set SIH_T_MAX 6
-param set SIH_MASS 0.3
-param set SIH_IXX 0.00402
-param set SIH_IYY 0.0144
-param set SIH_IZZ 0.0177
-param set SIH_IXZ 0.00046
-param set SIH_KDV 0.2
+# Phoenix 2400–scaled plant (span 2.40 m, mass 1.16 kg); weaken surface aero for larger cmds
+param set SIH_T_MAX 20
+param set SIH_MASS 1.16
+param set SIH_IXX 0.597
+param set SIH_IYY 0.441
+param set SIH_IZZ 0.446
+param set SIH_IXZ 0.0
+param set SIH_KDV 0.0
+param set-default SIH_CTRL_EFF 0.12
 
 # Allow true engine-off gliding in soaring mode
 param set-default FW_THR_MIN 0.0

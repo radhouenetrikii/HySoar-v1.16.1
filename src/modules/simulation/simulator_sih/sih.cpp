@@ -210,6 +210,8 @@ void Sih::sensor_step()
 
 	read_motors(dt);
 
+	update_thermal_field();
+
 	generate_force_and_torques();
 
 	equations_of_motion(dt);
@@ -289,6 +291,8 @@ void Sih::init_variables()
 
 	_lpos = Vector3f(0.0f, 0.0f, 0.0f);
 	_v_N = Vector3f(0.0f, 0.0f, 0.0f);
+	_v_air_E = Vector3f(0.0f, 0.0f, 0.0f);
+	_w_updraft = 0.f;
 	_p_E = Vector3d(Wgs84::equatorial_radius, 0.0, 0.0);
 	_v_E = Vector3f(0.0f, 0.0f, 0.0f);
 	_q = Quatf(1.0f, 0.0f, 0.0f, 0.0f);
@@ -354,14 +358,98 @@ void Sih::generate_force_and_torques()
 	}
 }
 
+void Sih::update_thermal_field()
+{
+	if (_thermal_field_sub.update(&_thermal_field)) {
+		_thermal_field_time = hrt_absolute_time();
+	}
+
+	if (_sih_therm_en.get() == 0 || _thermal_field.count == 0
+	    || (_thermal_field_time == 0)
+	    || (hrt_absolute_time() - _thermal_field_time > 5_s)) {
+		_w_updraft = 0.f;
+		_v_air_E = _v_E;
+		return;
+	}
+
+	const float alt_agl = -_lpos(2);
+	_w_updraft = allen_updraft_at(_lpos(0), _lpos(1), alt_agl);
+	_v_air_E = air_velocity_E(_w_updraft);
+}
+
+float Sih::allen_updraft_at(float north_m, float east_m, float alt_agl) const
+{
+	if (!_lpos_ref.isInitialized() || _thermal_field.count == 0) {
+		return 0.f;
+	}
+
+	float w_sum = 0.f;
+	const uint8_t n = math::min(_thermal_field.count, static_cast<uint8_t>(thermal_allen::MAX_THERMALS));
+
+	for (uint8_t i = 0; i < n; i++) {
+		const float scale = thermal_allen::lifecycle_scale(
+					    thermal_allen::Thermal{
+			_thermal_field.lat[i], _thermal_field.lon[i],
+			_thermal_field.zi[i], _thermal_field.wi[i],
+			_thermal_field.lifetime[i], _thermal_field.birth_time[i]
+		},
+		_thermal_field.sim_time_s, _thermal_field.lifecycle_enabled != 0);
+
+		if (scale <= 0.f) {
+			continue;
+		}
+
+		float th_n = 0.f;
+		float th_e = 0.f;
+		_lpos_ref.project(static_cast<double>(_thermal_field.lat[i]),
+				  static_cast<double>(_thermal_field.lon[i]), th_n, th_e);
+		const float dist = hypotf(north_m - th_n, east_m - th_e);
+		w_sum += thermal_allen::updraft_w(dist, alt_agl, _thermal_field.zi[i],
+						  _thermal_field.wi[i] * scale);
+	}
+
+	return w_sum;
+}
+
+matrix::Vector3f Sih::air_velocity_E(float w_up_mps) const
+{
+	// NED wind: updraft is negative Down. Convert to ECEF and subtract from ground velocity.
+	const Vector3f v_wind_N(0.f, 0.f, -w_up_mps);
+	return _v_E - _R_N2E * v_wind_N;
+}
+
 void Sih::generate_fw_aerodynamics(const float roll_cmd, const float pitch_cmd, const float yaw_cmd,
 				   const float throttle_cmd)
 {
-	const Vector3f v_B = _q_E.rotateVectorInverse(_v_E);
+	const Dcmf R_nb(_q);
+	const Vector3f y_N = R_nb.col(1); // body-right in NED
+	const float alt_agl = -_lpos(2);
+	const float w_cg = allen_updraft_at(_lpos(0), _lpos(1), alt_agl);
+	const float w_l = allen_updraft_at(_lpos(0) - y_N(0) * (ADV_PLANE_SPAN * 0.5f),
+					   _lpos(1) - y_N(1) * (ADV_PLANE_SPAN * 0.5f), alt_agl);
+	const float w_r = allen_updraft_at(_lpos(0) + y_N(0) * (ADV_PLANE_SPAN * 0.5f),
+					   _lpos(1) + y_N(1) * (ADV_PLANE_SPAN * 0.5f), alt_agl);
+
+	if (_vehicle == VehicleType::FixedWing) {
+		// Gazebo advanced_plane AdvancedLiftDrag1 (see advanced_liftdrag.hpp)
+		const Vector3f v_B = _q_E.rotateVectorInverse(air_velocity_E(w_cg));
+		const AdvancedLiftDrag adv{};
+		const AdvancedLiftDrag::Output aero = adv.update(_adv_ld_cfg, v_B, _w_B, roll_cmd, pitch_cmd, yaw_cmd,
+				ADV_PLANE_DEFL_MAX, w_cg, w_l, w_r, _sih_ctrl_eff.get());
+		const Vector3f Fa_B = aero.Fa_B - _KDV * v_B;
+		_Fa_E = _q_E.rotateVector(Fa_B);
+		_Ma_B = aero.Ma_B - _KDW * _w_B;
+		return;
+	}
+
+	// Legacy Khan flat-plate segments (standard VTOL fixed-wing mode)
+	const Vector3f v_B = _q_E.rotateVectorInverse(_v_air_E);
+	const Vector3f v_B_l = _q_E.rotateVectorInverse(air_velocity_E(w_l));
+	const Vector3f v_B_r = _q_E.rotateVectorInverse(air_velocity_E(w_r));
 	const float &alt = _lla.altitude();
 
-	_wing_l.update_aero(v_B, _w_B, alt, roll_cmd * FLAP_MAX);
-	_wing_r.update_aero(v_B, _w_B, alt, -roll_cmd * FLAP_MAX);
+	_wing_l.update_aero(v_B_l, _w_B, alt, roll_cmd * FLAP_MAX);
+	_wing_r.update_aero(v_B_r, _w_B, alt, -roll_cmd * FLAP_MAX);
 
 	_tailplane.update_aero(v_B, _w_B, alt, -pitch_cmd * FLAP_MAX, _T_MAX * throttle_cmd);
 	_fin.update_aero(v_B, _w_B, alt, yaw_cmd * FLAP_MAX, _T_MAX * throttle_cmd);
@@ -379,7 +467,7 @@ void Sih::generate_fw_aerodynamics(const float roll_cmd, const float pitch_cmd, 
 void Sih::generate_ts_aerodynamics()
 {
 	// velocity in body frame [m/s]
-	const Vector3f v_B = _q_E.rotateVectorInverse(_v_E);
+	const Vector3f v_B = _q_E.rotateVectorInverse(_v_air_E);
 
 	// the aerodynamic is resolved in a frame like a standard aircraft (nose-right-belly)
 	Vector3f v_ts = _R_S2B.transpose() * v_B;
@@ -553,13 +641,26 @@ void Sih::reconstruct_sensors_signals(const hrt_abstime &time_now_us)
 
 void Sih::send_airspeed(const hrt_abstime &time_now_us)
 {
-	// TODO: send differential pressure instead?
 	airspeed_s airspeed{};
 	airspeed.timestamp_sample = time_now_us;
 
-	// regardless of vehicle type, body frame, etc this holds as long as wind=0
-	airspeed.true_airspeed_m_s = fmaxf(0.1f, _v_E.norm() + generate_wgn() * 0.2f);
-	airspeed.indicated_airspeed_m_s = airspeed.true_airspeed_m_s * sqrtf(_wing_l.get_rho() / RHO);
+	float tas = 0.1f;
+
+	if (_vehicle == VehicleType::FixedWing) {
+		// Pitot-style: airspeed in the wing lift/drag plane (body FRD), not |v_ECEF| (spikes in a tumble)
+		const Vector3f v_B = _q_E.rotateVectorInverse(_v_air_E);
+		const float vx = v_B(0);
+		const float vz = v_B(2);
+		tas = sqrtf(vx * vx + vz * vz);
+
+	} else {
+		tas = _v_air_E.norm();
+	}
+
+	airspeed.true_airspeed_m_s = fmaxf(0.1f, tas + generate_wgn() * 0.2f);
+	// ISA sea-level density ratio (FixedWing no longer updates _wing_l aero)
+	const float rho = 1.2041f;
+	airspeed.indicated_airspeed_m_s = airspeed.true_airspeed_m_s * sqrtf(rho / RHO);
 	airspeed.confidence = 0.7f;
 	airspeed.timestamp = hrt_absolute_time();
 	_airspeed_pub.publish(airspeed);
@@ -732,6 +833,8 @@ int Sih::print_status()
 	}
 
 	PX4_INFO("vehicle landed: %d", _grounded);
+	PX4_INFO("Allen updraft w (up) [m/s]: %.2f  thermals: %u  SIH_THERM_EN: %d",
+		 (double)_w_updraft, (unsigned)_thermal_field.count, (int)_sih_therm_en.get());
 	PX4_INFO("local position NED (m)");
 	_lpos.print();
 	PX4_INFO("local velocity NED (m/s)");

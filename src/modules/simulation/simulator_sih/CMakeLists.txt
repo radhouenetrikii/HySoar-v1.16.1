@@ -38,6 +38,8 @@ px4_add_module(
 		${MAX_CUSTOM_OPT_LEVEL}
 	SRCS
 		aero.hpp
+		advanced_liftdrag.hpp
+		thermal_allen.hpp
 		sih.cpp
 		sih.hpp
 	DEPENDS

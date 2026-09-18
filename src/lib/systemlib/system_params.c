@@ -84,6 +84,20 @@ PARAM_DEFINE_INT32(SYS_AUTOCONFIG, 0);
 PARAM_DEFINE_INT32(SYS_HITL, 0);
 
 /**
+ * Allow real PWM outputs during SIH / HITL
+ *
+ * By default PX4 sets actuator lockdown whenever hil_state is ON so real
+ * MAIN/AUX servos stay at disarmed PWM while SIH/HITL runs. Set this to 1 on a
+ * bench (propeller removed, ESC unpowered) to let PWM_MAIN_* follow the
+ * controller during SIH missions.
+ *
+ * @boolean
+ * @reboot_required true
+ * @group Simulation In Hardware
+ */
+PARAM_DEFINE_INT32(SIH_ACT_OUT, 0);
+
+/**
  * Parameter version
  *
  * This is used internally only: an airframe configuration might set an expected

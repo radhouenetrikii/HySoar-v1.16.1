@@ -79,6 +79,11 @@
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_global_position.h>
 #include <uORB/topics/vehicle_local_position.h>
+#include <uORB/topics/sih_thermal_field.h>
+
+#include "thermal_allen.hpp"
+#include "aero.hpp"
+#include "advanced_liftdrag.hpp"
 
 #if defined(ENABLE_LOCKSTEP_SCHEDULER)
 #include <sys/time.h>
@@ -132,18 +137,26 @@ private:
 
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 	uORB::Subscription _actuator_out_sub{ORB_ID(actuator_outputs)};
+	uORB::Subscription _thermal_field_sub{ORB_ID(sih_thermal_field)};
 
 	// hard constants
 	static constexpr uint16_t NUM_ACTUATORS_MAX = 9;
 	static constexpr float T1_C = 15.0f;                        // ground temperature in Celsius
 	static constexpr float T1_K = T1_C - atmosphere::kAbsoluteNullCelsius;   // ground temperature in Kelvin
 	static constexpr float TEMP_GRADIENT = -6.5f / 1000.0f;    // temperature gradient in degrees per metre
-	// Aerodynamic coefficients
-	static constexpr float RHO = 1.225f; 		// air density at sea level [kg/m^3]
-	static constexpr float SPAN = 0.86f; 	// wing span [m]
-	static constexpr float MAC = 0.21f; 	// wing mean aerodynamic chord [m]
-	static constexpr float RP = 0.1f; 	// radius of the propeller [m]
-	static constexpr float FLAP_MAX = M_PI_F / 12.0f; // 15 deg, maximum control surface deflection
+	// Phoenix 2400–scaled geometry — used by AdvancedLiftDrag + Allen wingtip sampling
+	// span 2.40 m, AR 6.5 → area = b²/AR, MAC = area/b
+	static constexpr float ADV_PLANE_AREA = 0.886f;
+	static constexpr float ADV_PLANE_AR = 6.5f;
+	static constexpr float ADV_PLANE_SPAN = 2.40f;
+	static constexpr float ADV_PLANE_MAC = 0.369f;
+	// Legacy Khan-model segments (standard VTOL fixed-wing surfaces)
+	static constexpr float RHO = 1.225f;
+	static constexpr float FW_SEG_SPAN = 0.86f;
+	static constexpr float FW_SEG_MAC = 0.21f;
+	static constexpr float RP = 0.1f;
+	static constexpr float FLAP_MAX = M_PI_F / 12.0f; // 15 deg (legacy Khan VTOL surfaces)
+	static constexpr float ADV_PLANE_DEFL_MAX = 0.78f; // Gazebo advanced_plane joint limit [rad]
 
 	void init_variables();
 
@@ -165,6 +178,9 @@ private:
 	void generate_ts_aerodynamics();
 	void sensor_step();
 	static float computeGravity(double lat);
+	void update_thermal_field();
+	float allen_updraft_at(float north_m, float east_m, float alt_agl) const;
+	matrix::Vector3f air_velocity_E(float w_up_mps) const;
 
 	void ecefToNed();
 	static matrix::Dcmf computeRotEcefToNed(const LatLonAlt &lla);
@@ -224,14 +240,16 @@ private:
 
 	VehicleType _vehicle = VehicleType::Multicopter;
 
-	// aerodynamic segments for the fixedwing
-	AeroSeg _wing_l = AeroSeg(SPAN / 2.0f, MAC, -4.0f, matrix::Vector3f(0.0f, -SPAN / 4.0f, 0.0f), 3.0f,
-				  SPAN / MAC, MAC / 3.0f);
-	AeroSeg _wing_r = AeroSeg(SPAN / 2.0f, MAC, -4.0f, matrix::Vector3f(0.0f, SPAN / 4.0f, 0.0f), -3.0f,
-				  SPAN / MAC, MAC / 3.0f);
+	// aerodynamic segments for the standard VTOL fixed-wing surfaces (Khan model)
+	AeroSeg _wing_l = AeroSeg(FW_SEG_SPAN / 2.0f, FW_SEG_MAC, -4.0f, matrix::Vector3f(0.0f, -FW_SEG_SPAN / 4.0f, 0.0f), 3.0f,
+				  FW_SEG_SPAN / FW_SEG_MAC, FW_SEG_MAC / 3.0f);
+	AeroSeg _wing_r = AeroSeg(FW_SEG_SPAN / 2.0f, FW_SEG_MAC, -4.0f, matrix::Vector3f(0.0f, FW_SEG_SPAN / 4.0f, 0.0f), -3.0f,
+				  FW_SEG_SPAN / FW_SEG_MAC, FW_SEG_MAC / 3.0f);
 	AeroSeg _tailplane = AeroSeg(0.3f, 0.1f, 0.0f, matrix::Vector3f(-0.4f, 0.0f, 0.0f), 0.0f, -1.0f, 0.05f, RP);
 	AeroSeg _fin = AeroSeg(0.25, 0.18, 0.0f, matrix::Vector3f(-0.45f, 0.0f, -0.1f), -90.0f, -1.0f, 0.12f, RP);
 	AeroSeg _fuselage = AeroSeg(0.2, 0.8, 0.0f, matrix::Vector3f(0.0f, 0.0f, 0.0f), -90.0f);
+
+	AdvancedLiftDrag::Config _adv_ld_cfg{AdvancedLiftDrag::advancedPlaneConfig()};
 
 	// aerodynamic segments for the tailsitter
 	static constexpr const int NB_TS_SEG = 11;
@@ -301,6 +319,13 @@ private:
 		(ParamFloat<px4::params::SIH_DISTSNSR_MAX>) _sih_distance_snsr_max,
 		(ParamFloat<px4::params::SIH_DISTSNSR_OVR>) _sih_distance_snsr_override,
 		(ParamFloat<px4::params::SIH_T_TAU>) _sih_thrust_tau,
-		(ParamInt<px4::params::SIH_VEHICLE_TYPE>) _sih_vtype
+		(ParamInt<px4::params::SIH_VEHICLE_TYPE>) _sih_vtype,
+		(ParamInt<px4::params::SIH_THERM_EN>) _sih_therm_en,
+		(ParamFloat<px4::params::SIH_CTRL_EFF>) _sih_ctrl_eff
 	)
+
+	sih_thermal_field_s _thermal_field{};
+	hrt_abstime _thermal_field_time{0};
+	float _w_updraft{0.f};          ///< last CG Allen updraft, positive up [m/s]
+	matrix::Vector3f _v_air_E{};    ///< ECEF air-relative velocity (ground minus wind)
 };

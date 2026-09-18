@@ -136,6 +136,9 @@ subscriptions:
   - topic: /fmu/in/autosoaring_control
     type: px4_msgs::msg::AutosoaringControl
 
+  - topic: /fmu/in/sih_thermal_field
+    type: px4_msgs::msg::SihThermalField
+
   - topic: /fmu/in/vehicle_attitude_setpoint
     type: px4_msgs::msg::VehicleAttitudeSetpoint
 
