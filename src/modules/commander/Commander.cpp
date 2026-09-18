@@ -417,37 +417,6 @@ int Commander::custom_command(int argc, char *argv[])
 				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
 						     PX4_CUSTOM_SUB_MODE_EXTERNAL1);
 
-			} else if (!strcmp(argv[1], "soar:glide")) {
-				// SOARING_GLIDE_FIXED (mode 1): engine-off, fixed EAS = FW_GLIDE_AIRSPD, follow mission.
-				// param1 = soaring_mode integer.
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 1.0f, 0.0f);
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
-						     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
-
-			} else if (!strcmp(argv[1], "soar:polar")) {
-				// SOARING_GLIDE_POLAR (mode 2): engine-off, polar best-glide EAS = sqrt(B/A), follow mission.
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 2.0f, 0.0f);
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
-						     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
-
-			} else if (!strcmp(argv[1], "soar:thermal")) {
-				// SOARING_THERMAL_LOITER (mode 3): engine-off, radius-guided loiter via navigator.
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 3.0f, 0.0f);
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
-						     PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
-
-			} else if (!strcmp(argv[1], "soar:bank")) {
-				// SOARING_THERMAL_BANK (mode 4): engine-off, direct bank-angle loiter (companion controls centering).
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 4.0f, 0.0f);
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
-						     PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
-
-			} else if (!strcmp(argv[1], "soar:off")) {
-				// SOARING_OFF (mode 0): disable soaring and restore powered flight.
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_CUSTOM_0, 0.0f, 0.0f);
-				send_vehicle_command(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1, PX4_CUSTOM_MAIN_MODE_AUTO,
-						     PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
-
 			} else {
 				PX4_ERR("argument %s unsupported.", argv[1]);
 			}

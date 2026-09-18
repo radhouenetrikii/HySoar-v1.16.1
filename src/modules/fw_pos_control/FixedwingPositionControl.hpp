@@ -415,16 +415,12 @@ private:
 	autosoaring_control_s _autosoaring_control{};       ///< Last received soaring command message
 	hrt_abstime  _autosoaring_last_recv_us{0};          ///< Timestamp of last valid AutosoaringControl message
 	hrt_abstime  _soaring_mode_cmd_last_us{0};          ///< Debounce: minimum 1 s between mode-switch commands
-	hrt_abstime  _soaring_dds_inhibit_until_us{0};      ///< DDS re-enable blocked until this timestamp (set by soar:off, 5 s cooldown)
-	hrt_abstime  _autosoaring_status_repub_us{0};       ///< Last autosoaring_status republish during DDS inhibit (1 Hz while active)
-	hrt_abstime  _autosoaring_status_periodic_us{0};   ///< Last periodic phase heartbeat while soaring active (2 Hz)
-	bool         _soaring_expect_set_mode{false};       ///< True when CUSTOM_0 (soar:glide/thermal) was just received; next DO_SET_MODE is paired
+	hrt_abstime  _autosoaring_status_periodic_us{0};    ///< Last periodic phase heartbeat while soaring active (2 Hz)
 	double       _soaring_last_lat{NAN};                ///< Last thermal centre latitude sent to navigator
 	double       _soaring_last_lon{NAN};                ///< Last thermal centre longitude sent to navigator
 	bool         _soaring_last_clockwise{true};         ///< Last turn direction sent to navigator; change triggers re-DO_REPOSITION
 	bool         _alt_max_reached{false};               ///< Hysteresis state: altitude ceiling reached
 	bool         _soaring_forbidden_latched{false};     ///< Latch: soaring disabled below FW_ALT_MIN until companion re-enables
-	bool         _soaring_local_override{false};        ///< True when soaring was enabled via CLI (bypasses alt check + staleness watchdog)
 	bool         _soaring_was_thermal{false};           ///< Previous-cycle thermal state (modes 3 or 4); used to detect thermal→off transition for auto-exit
 	bool         _soaring_was_bank_thermal{false};      ///< Previous-cycle SOARING_THERMAL_BANK (mode 4) state; used to clean up roll override on exit
 	bool         _soaring_was_glide{false};             ///< Previous-cycle glide state (modes 1 or 2); used to detect glide→off transition for auto mission-restore

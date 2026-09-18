@@ -218,96 +218,6 @@ FixedwingPositionControl::vehicle_command_poll()
 				}
 			}
 
-		} else if (vehicle_command.command == vehicle_command_s::VEHICLE_CMD_CUSTOM_0) {
-			// CLI soaring command: param1 encodes the soaring_mode integer directly.
-			//   0 = SOARING_OFF   1 = SOARING_GLIDE_FIXED   2 = SOARING_GLIDE_POLAR
-			//   3 = SOARING_THERMAL_LOITER                  4 = SOARING_THERMAL_BANK
-			// Optional: param2 = bank_angle_cmd [deg], param3 = loiter_radius_m.
-			// CLI always wins over DDS — it represents the ground operator's intent.
-			const uint8_t new_mode = static_cast<uint8_t>(math::constrain(
-						(int)vehicle_command.param1, 0,
-						(int)autosoaring_control_s::SOARING_THERMAL_BANK));
-			_autosoaring_control.soaring_mode     = new_mode;
-			_autosoaring_control.loiter_radius_m  = (vehicle_command.param3 > FLT_EPSILON)
-								? vehicle_command.param3 : NAN;
-			if (PX4_ISFINITE(vehicle_command.param2) && vehicle_command.param2 > FLT_EPSILON) {
-				_autosoaring_control.bank_angle_cmd = vehicle_command.param2;
-			}
-
-			const bool enabling = (new_mode != autosoaring_control_s::SOARING_OFF);
-
-		if (enabling) {
-			// CLI enables soaring: take local authority, clear any cooldown so DDS
-			// is also re-allowed (CLI and DDS cooperate when both want soaring).
-			_soaring_local_override       = true;
-			_soaring_dds_inhibit_until_us = 0;     // no cooldown active
-			_soaring_forbidden_latched    = false; // CLI always clears latch
-			_autosoaring_last_recv_us     = 0;     // disable staleness watchdog
-			// Mark that the paired DO_SET_MODE (auto:mission/loiter) is soaring-related.
-			_soaring_expect_set_mode      = true;
-			// Reset DO_REPOSITION debounce so the first thermal command fires immediately
-			// on the very next control_auto() cycle (not blocked by a recent glide command).
-			_soaring_mode_cmd_last_us     = 0;
-			_soaring_last_lat             = NAN;
-			_soaring_last_lon             = NAN;
-			// Notify companion immediately so it knows CLI took authority and which mode is active.
-			publish_autosoaring_status(autosoaring_status_s::SOURCE_CLI_SOARING_ON,
-						   new_mode,
-						   0,
-						   autosoaring_status_s::SOARING_PHASE_CRUISE);
-
-			} else {
-				// CLI soar:off: stop immediately and block DDS for 5 s.
-				// After 5 s the DDS path is automatically re-allowed so the companion
-				// can take back control without needing a CLI soar:glide first.
-				_soaring_local_override       = false;
-				_soaring_forbidden_latched    = false;
-				_soaring_expect_set_mode      = false;
-				_soaring_dds_inhibit_until_us = hrt_absolute_time() + 5_s;
-				// Reset to 0 (not hrt_absolute_time) so the staleness watchdog,
-				// which triggers on _autosoaring_last_recv_us > 0, is not activated.
-				_autosoaring_last_recv_us     = 0;
-			_tecs.set_gliding_mode_enabled(false);
-			publish_autosoaring_status(autosoaring_status_s::SOURCE_CLI_SOARING_OFF,
-						   _autosoaring_control.soaring_mode,
-						   _soaring_dds_inhibit_until_us,
-						   autosoaring_status_s::SOARING_PHASE_CRUISE);
-			_autosoaring_status_repub_us = hrt_absolute_time();
-			}
-
-		} else if (vehicle_command.command == vehicle_command_s::VEHICLE_CMD_DO_SET_MODE) {
-			// When soaring is CLI-active and a DO_SET_MODE arrives:
-			//  - If paired with a recent CUSTOM_0 (soar:glide sends both back-to-back):
-			//    → it IS the soaring mode switch, leave soaring on.
-			//  - If switching to AUTO_MISSION or AUTO_LOITER redundantly (QGC heartbeat):
-			//    → ignore — these modes are compatible with soaring.
-			//  - If switching to an incompatible mode (MANUAL, STABILIZED, etc.):
-			//    → treat as "exit soaring, restore powered flight".
-			if (_soaring_local_override) {
-				if (_soaring_expect_set_mode) {
-					_soaring_expect_set_mode = false;  // consume the pairing — soaring stays ON
-
-				} else {
-					// Check if the target mode is compatible with soaring (AUTO_MISSION or AUTO_LOITER).
-					// QGC sends periodic DO_SET_MODE(AUTO_MISSION) to maintain mode — ignore those.
-					const uint8_t main_mode = (uint8_t)vehicle_command.param2;
-					const uint8_t sub_mode  = (uint8_t)vehicle_command.param3;
-					const bool target_auto_mission = (main_mode == PX4_CUSTOM_MAIN_MODE_AUTO &&
-									  sub_mode  == PX4_CUSTOM_SUB_MODE_AUTO_MISSION);
-					const bool target_auto_loiter  = (main_mode == PX4_CUSTOM_MAIN_MODE_AUTO &&
-									  sub_mode  == PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
-
-					if (!target_auto_mission && !target_auto_loiter) {
-						// Switching to an incompatible mode → exit soaring
-						_autosoaring_control.soaring_mode  = autosoaring_control_s::SOARING_OFF;
-						_soaring_local_override    = false;
-						_soaring_forbidden_latched = false;
-						_tecs.set_gliding_mode_enabled(false);
-						PX4_INFO("Autosoaring: mode switch → soaring disabled, powered flight restored");
-					}
-					// else: AUTO_MISSION/AUTO_LOITER redundant from QGC — keep soaring active
-				}
-			}
 		}
 	}
 }
@@ -1009,21 +919,8 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 	// -------------------------------------------------------------------------
 	// Autosoaring control block
 	// -------------------------------------------------------------------------
-	// Three entry paths (priority order):
-	//   1. CLI  (`commander mode soar:glide/thermal/off`) via VEHICLE_CMD_CUSTOM_0
-	//      → _soaring_local_override=true, altitude checks bypassed (pilot in command)
-	//   2. ROS2 companion via XRCE-DDS (AutosoaringControl uORB)
-	//      → altitude safety enforced, staleness watchdog active
-	//   3. Any other mode switch (soar:off, mode change in vehicle_command_poll)
-	//      → clears flags, powered flight restored
-	//
-	// BUG FIXES vs previous version:
-	//   - Removed nav_state auto-exit guard: it fired before Commander finished the
-	//     mode switch, killing soaring on the very first cycle.
-	//   - Altitude floor (FW_ALT_MIN) is SKIPPED when _soaring_local_override=true
-	//     so CLI testing works at any altitude.
-	//   - _soaring_forbidden_latched is cleared whenever soaring is disabled (not
-	//     just when soaring_requested=false), preventing permanent lock-out.
+	// Single entry path: ROS 2 companion via XRCE-DDS (AutosoaringControl uORB).
+	// Altitude safety enforced via FW_ALT_MIN; staleness watchdog active.
 	// -------------------------------------------------------------------------
 
 	const float alt_min  = _param_fw_alt_min.get();
@@ -1038,22 +935,12 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 	const bool    thermal_cmd = (soaring_cmd == autosoaring_control_s::SOARING_THERMAL_LOITER ||
 				     soaring_cmd == autosoaring_control_s::SOARING_THERMAL_BANK);
 
-	// Altitude floor — enforced on ALL paths (DDS and CLI).
-	// CLI local override is also cleared so the aircraft resumes powered flight automatically;
-	// the operator must re-issue soar:glide/polar once altitude is recovered.
+	// Altitude floor — DDS soaring disabled below FW_ALT_MIN.
 	if (soaring_requested && current_altitude < alt_min) {
 		if (!_soaring_forbidden_latched) {
 			_soaring_forbidden_latched = true;
-			// If CLI was in control, release the override so mission resumes automatically.
-			if (_soaring_local_override) {
-				_soaring_local_override    = false;
-				_soaring_expect_set_mode   = false;
-				PX4_WARN("Soaring CLI override released: alt %.0f m below FW_ALT_MIN %.0f m — resuming mission",
-					 (double)current_altitude, (double)alt_min);
-			} else {
-				PX4_WARN("Soaring disabled: alt %.0f m below min %.0f m (FW_ALT_MIN)",
-					 (double)current_altitude, (double)alt_min);
-			}
+			PX4_WARN("Soaring disabled: alt %.0f m below min %.0f m (FW_ALT_MIN)",
+				 (double)current_altitude, (double)alt_min);
 		}
 	}
 
@@ -1071,8 +958,8 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 		_alt_max_reached = true;
 	}
 
-	// soaring_allowed: DDS path respects latch; CLI local override bypasses it
-	const bool soaring_allowed = soaring_requested && (_soaring_local_override || !_soaring_forbidden_latched);
+	// soaring_allowed: DDS command is accepted only when altitude latch is clear
+	const bool soaring_allowed = soaring_requested && !_soaring_forbidden_latched;
 
 	// Effective modes: altitude ceiling forces glide even when thermal was requested.
 	// When ceiling forces a thermal→glide transition, fall back to SOARING_GLIDE_FIXED.
@@ -1252,7 +1139,7 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 	}
 
 	// Detect thermal→off transition: return to powered AUTO_MISSION automatically.
-	// This handles both DDS staleness watchdog expiry and explicit soar:off/soar:glide switches.
+	// This handles both DDS staleness watchdog expiry and explicit soaring mode changes.
 	// Condition: we were thermalling last cycle, thermal just ended, and we are NOT switching
 	// directly into glide mode (altitude-ceiling event handles that separately).
 	if (_soaring_was_thermal && !effective_thermal && !effective_glide) {
@@ -1266,9 +1153,6 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 		exit_cmd.target_system   = 1;
 		exit_cmd.target_component = 1;
 		_pub_vehicle_command.publish(exit_cmd);
-		// Clear local override so vehicle_command_poll() does not intercept
-		// the command above as a "standalone mode switch exit soaring" (soaring already off).
-		_soaring_local_override    = false;
 		_soaring_forbidden_latched = false;
 	// Reset the thermal-centre cache so the NEXT thermal entry is treated as a
 	// fresh first_activation (new DO_REPOSITION + new mission-index latch).
@@ -1284,7 +1168,7 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 	}
 
 	// Glide → off transition: send DO_SET_MODE → AUTO_MISSION so the navigator
-	// resumes the mission plan after an altitude-floor event (or explicit soar:off).
+	// resumes the mission plan after an altitude-floor event or companion disable.
 	// Only fires once per transition (_soaring_was_glide guards it), same pattern as
 	// the thermal→off block above.
 	const bool soaring_was_glide_only = _soaring_was_glide && !_soaring_was_thermal;
@@ -1299,13 +1183,7 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 		glide_exit_cmd.target_system    = 1;
 		glide_exit_cmd.target_component = 1;
 		_pub_vehicle_command.publish(glide_exit_cmd);
-
-		// Clear local override so vehicle_command_poll() does not intercept the
-		// DO_SET_MODE above as a "standalone mode switch → exit soaring" when soaring
-		// is already exiting.  Mirrors the same guard in the thermal→off block.
-		_soaring_local_override    = false;
 		_soaring_forbidden_latched = false;
-
 		PX4_INFO("Autosoaring: glide ended → AUTO_MISSION");
 	}
 
@@ -1335,10 +1213,10 @@ FixedwingPositionControl::control_auto(const float control_interval, const Vecto
 				fmu_phase = autosoaring_status_s::SOARING_PHASE_CRUISE;
 			}
 
-			publish_autosoaring_status(autosoaring_status_s::SOURCE_PERIODIC,
-						   _autosoaring_control.soaring_mode,
-						   _soaring_dds_inhibit_until_us,
-						   fmu_phase);
+		publish_autosoaring_status(autosoaring_status_s::SOURCE_PERIODIC,
+					   _autosoaring_control.soaring_mode,
+					   0,
+					   fmu_phase);
 		}
 	}
 
@@ -3047,43 +2925,25 @@ FixedwingPositionControl::Run()
 
 		if (_autosoaring_control_sub.update(&soaring_msg)) {
 			const hrt_abstime now = hrt_absolute_time();
-			const bool dds_inhibited = (_soaring_dds_inhibit_until_us > 0 && now < _soaring_dds_inhibit_until_us);
-			const bool dds_wants_soaring = (soaring_msg.soaring_mode != autosoaring_control_s::SOARING_OFF);
+			const bool prev_thermal = (
+				_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_THERMAL_LOITER ||
+				_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_THERMAL_BANK);
+			const bool new_thermal = (
+				soaring_msg.soaring_mode == autosoaring_control_s::SOARING_THERMAL_LOITER ||
+				soaring_msg.soaring_mode == autosoaring_control_s::SOARING_THERMAL_BANK);
+			_autosoaring_control      = soaring_msg;
+			_autosoaring_last_recv_us = now;
 
-			if (dds_inhibited && dds_wants_soaring) {
-				// soar:off cooldown active: ignore DDS re-enable attempts.
-				// After 5 s the cooldown expires and DDS takes back control automatically.
-
-			} else {
-				if (!dds_wants_soaring) {
-					// DDS explicitly disabled soaring → cancel any remaining cooldown.
-					_soaring_dds_inhibit_until_us = 0;
-				}
-
-				// DDS is only authoritative when CLI is not holding local override.
-				if (!_soaring_local_override) {
-					const bool prev_thermal = (
-						_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_THERMAL_LOITER ||
-						_autosoaring_control.soaring_mode == autosoaring_control_s::SOARING_THERMAL_BANK);
-					const bool new_thermal = (
-						soaring_msg.soaring_mode == autosoaring_control_s::SOARING_THERMAL_LOITER ||
-						soaring_msg.soaring_mode == autosoaring_control_s::SOARING_THERMAL_BANK);
-					_autosoaring_control      = soaring_msg;
-					_autosoaring_last_recv_us = now;
-
-					// If thermal just became active reset the DO_REPOSITION debounce.
-					if (!prev_thermal && new_thermal) {
-						_soaring_mode_cmd_last_us = 0;
-						_soaring_last_lat         = NAN;
-						_soaring_last_lon         = NAN;
-					}
-				}
+			// If thermal just became active reset the DO_REPOSITION debounce.
+			if (!prev_thermal && new_thermal) {
+				_soaring_mode_cmd_last_us = 0;
+				_soaring_last_lat         = NAN;
+				_soaring_last_lon         = NAN;
 			}
 		}
 
-		// Staleness watchdog: companion silent >2 s → disable soaring (DDS path only).
-		if (!_soaring_local_override &&
-		    _autosoaring_last_recv_us > 0 &&
+		// Staleness watchdog: companion silent >2 s → disable soaring.
+		if (_autosoaring_last_recv_us > 0 &&
 		    (hrt_absolute_time() - _autosoaring_last_recv_us) > 2_s) {
 			if (_autosoaring_control.soaring_mode != autosoaring_control_s::SOARING_OFF) {
 				PX4_WARN("Autosoaring: companion silent >2 s - disabling soaring");
@@ -3095,24 +2955,6 @@ FixedwingPositionControl::Run()
 
 			_tecs.set_gliding_mode_enabled(false);
 			_autosoaring_last_recv_us = 0;
-		}
-
-		// While soar:off DDS inhibit is active, republish status at 1 Hz for robustness if the companion misses a sample.
-		{
-			const hrt_abstime status_now = hrt_absolute_time();
-
-			if (_soaring_dds_inhibit_until_us > 0 && status_now < _soaring_dds_inhibit_until_us) {
-				if (status_now - _autosoaring_status_repub_us >= 1_s) {
-					_autosoaring_status_repub_us = status_now;
-				publish_autosoaring_status(autosoaring_status_s::SOURCE_CLI_SOARING_OFF,
-							   _autosoaring_control.soaring_mode,
-							   _soaring_dds_inhibit_until_us,
-							   autosoaring_status_s::SOARING_PHASE_CRUISE);
-				}
-
-			} else {
-				_autosoaring_status_repub_us = 0;
-			}
 		}
 
 		vehicle_global_position_s gpos;
